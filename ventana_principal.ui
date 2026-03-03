@@ -1,0 +1,679 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1280</width>
+    <height>720</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>1280</width>
+    <height>720</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <item>
+     <layout class="QHBoxLayout" name="modeButtonsLayout">
+      <item>
+       <widget class="QPushButton" name="btn_cochera">
+        <property name="text">
+         <string>Cochera</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btn_estacionamiento">
+        <property name="text">
+         <string>Estacionamiento</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QStackedWidget" name="stack">
+      <widget class="QWidget" name="page_cochera">
+       <layout class="QVBoxLayout" name="cocheraLayout">
+        <property name="leftMargin">
+         <number>0</number>
+        </property>
+        <property name="topMargin">
+         <number>0</number>
+        </property>
+        <property name="rightMargin">
+         <number>0</number>
+        </property>
+        <property name="bottomMargin">
+         <number>0</number>
+        </property>
+        <property name="spacing">
+         <number>6</number>
+        </property>
+        <item>
+         <layout class="QHBoxLayout" name="fechaHoraLayout">
+          <property name="alignment">
+           <set>Qt::AlignLeft</set>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <layout class="QVBoxLayout" name="fechaLayout">
+            <item>
+             <widget class="QLabel" name="label_fecha_num">
+              <property name="font">
+               <font>
+                <pointsize>14</pointsize>
+                <bold>true</bold>
+               </font>
+              </property>
+              <property name="text">
+               <string>Fecha: 07/02/2026</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_hora_value">
+            <property name="font">
+             <font>
+              <pointsize>14</pointsize>
+              <bold>true</bold>
+             </font>
+            </property>
+            <property name="text">
+             <string>Hora: 00:00</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QLabel" name="label_cochera_title">
+          <property name="font">
+           <font>
+            <pointsize>14</pointsize>
+            <bold>true</bold>
+           </font>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignCenter</set>
+          </property>
+          <property name="text">
+           <string>Interfaz Cochera</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="group_cochera_acciones">
+          <property name="title">
+           <string>Acciones</string>
+          </property>
+          <layout class="QHBoxLayout" name="accionesCocheraLayout">
+           <item>
+            <widget class="QPushButton" name="btn_mapa_cocheras">
+             <property name="text">
+              <string>Mapa de cocheras</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_clientes">
+             <property name="text">
+              <string>Clientes</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_contratos">
+             <property name="text">
+              <string>Contratos</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_reportes">
+             <property name="text">
+              <string>Reportes</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_vencimientos">
+             <property name="text">
+              <string>Vencimientos proximos</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="accionesCocheraSpacer">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="group_cochera_resumen">
+          <property name="title">
+           <string>Resumen cochera</string>
+          </property>
+          <layout class="QVBoxLayout" name="cochera_resumen_layout">
+           <item>
+            <layout class="QGridLayout" name="kpiGrid">
+             <item row="0" column="0">
+              <widget class="QFrame" name="card_total">
+               <property name="frameShape">
+                <enum>QFrame::StyledPanel</enum>
+               </property>
+               <layout class="QVBoxLayout" name="cardTotalLayout">
+                <item>
+                 <widget class="QLabel" name="label_total_title">
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>Cocheras totales</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="label_total_value">
+                  <property name="font">
+                   <font>
+                    <pointsize>16</pointsize>
+                    <bold>true</bold>
+                   </font>
+                  </property>
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>0</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item row="0" column="1">
+              <widget class="QFrame" name="card_ocupadas">
+               <property name="frameShape">
+                <enum>QFrame::StyledPanel</enum>
+               </property>
+               <layout class="QVBoxLayout" name="cardOcupadasLayout">
+                <item>
+                 <widget class="QLabel" name="label_ocupadas_title">
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>Cocheras ocupadas</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="label_ocupadas_value">
+                  <property name="font">
+                   <font>
+                    <pointsize>16</pointsize>
+                    <bold>true</bold>
+                   </font>
+                  </property>
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>0</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item row="0" column="2">
+              <widget class="QFrame" name="card_libres">
+               <property name="frameShape">
+                <enum>QFrame::StyledPanel</enum>
+               </property>
+               <layout class="QVBoxLayout" name="cardLibresLayout">
+                <item>
+                 <widget class="QLabel" name="label_libres_title">
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>Cocheras libres</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="label_libres_value">
+                  <property name="font">
+                   <font>
+                    <pointsize>16</pointsize>
+                    <bold>true</bold>
+                   </font>
+                  </property>
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>0</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item row="1" column="1">
+              <widget class="QFrame" name="card_ingresos">
+               <property name="frameShape">
+                <enum>QFrame::StyledPanel</enum>
+               </property>
+               <layout class="QVBoxLayout" name="cardIngresosLayout">
+                <item>
+                 <widget class="QLabel" name="label_ingresos_title">
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>Ingresos del mes</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="label_ingresos_value">
+                  <property name="font">
+                   <font>
+                    <pointsize>16</pointsize>
+                    <bold>true</bold>
+                   </font>
+                  </property>
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>$ 0</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+  
+             <item row="1" column="0">
+              <widget class="QFrame" name="card_mensual">
+               <property name="frameShape">
+                <enum>QFrame::StyledPanel</enum>
+               </property>
+               <layout class="QVBoxLayout" name="cardMensualLayout">
+                <item>
+                 <widget class="QLabel" name="label_mensual_title">
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>Precio mensual cochera</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QLabel" name="label_mensual_value">
+                  <property name="font">
+                   <font>
+                    <pointsize>16</pointsize>
+                    <bold>true</bold>
+                   </font>
+                  </property>
+                  <property name="alignment">
+                   <set>Qt::AlignCenter</set>
+                  </property>
+                  <property name="text">
+                   <string>$ 0.00</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+            </layout>
+           </item>
+          </layout>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="page_estacionamiento">
+       <layout class="QVBoxLayout" name="estacionamientoLayout">
+        <item>
+         <layout class="QHBoxLayout" name="estFechaHoraLayout">
+          <property name="alignment">
+           <set>Qt::AlignLeft</set>
+          </property>
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <layout class="QVBoxLayout" name="estFechaLayout">
+            <item>
+             <widget class="QLabel" name="label_est_fecha_num">
+              <property name="font">
+               <font>
+                <pointsize>14</pointsize>
+                <bold>true</bold>
+               </font>
+              </property>
+              <property name="text">
+               <string>Fecha: 07/02/2026</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_est_hora_top_value">
+            <property name="font">
+             <font>
+              <pointsize>14</pointsize>
+              <bold>true</bold>
+             </font>
+            </property>
+            <property name="text">
+             <string>Hora: 00:00</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QLabel" name="label_estacionamiento">
+          <property name="font">
+           <font>
+            <pointsize>14</pointsize>
+            <bold>true</bold>
+           </font>
+          </property>
+          <property name="alignment">
+           <set>Qt::AlignCenter</set>
+          </property>
+          <property name="text">
+           <string>Interfaz de Estacionamiento</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QGroupBox" name="group_est_acciones">
+          <property name="title">
+           <string>Acciones</string>
+          </property>
+          <layout class="QHBoxLayout" name="estAccionesLayout">
+           <item>
+            <widget class="QPushButton" name="btn_mapa_est">
+             <property name="text">
+              <string>Mapa de cocheras</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="estAccionesSpacer">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
+         </widget>
+        </item>
+       <item>
+        <layout class="QVBoxLayout" name="est_kpi_layout">
+         <item>
+          <widget class="QFrame" name="card_est_hora">
+            <property name="frameShape">
+             <enum>QFrame::StyledPanel</enum>
+            </property>
+            <layout class="QVBoxLayout" name="cardEstHoraLayout">
+             <item>
+              <widget class="QLabel" name="label_est_hora_title">
+               <property name="alignment">
+                <set>Qt::AlignCenter</set>
+               </property>
+               <property name="text">
+                <string>Hora actual</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLabel" name="label_est_hora_value">
+               <property name="font">
+                <font>
+                 <pointsize>16</pointsize>
+                 <bold>true</bold>
+                </font>
+               </property>
+               <property name="alignment">
+                <set>Qt::AlignCenter</set>
+               </property>
+               <property name="text">
+                <string>00:00:00</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+          </widget>
+         </item>
+         <item>
+          <widget class="QFrame" name="card_est_tarifa">
+            <property name="frameShape">
+             <enum>QFrame::StyledPanel</enum>
+            </property>
+            <layout class="QVBoxLayout" name="cardEstTarifaLayout">
+             <item>
+              <widget class="QLabel" name="label_est_tarifa_title">
+               <property name="alignment">
+                <set>Qt::AlignCenter</set>
+               </property>
+               <property name="text">
+                <string>Tarifa por hora</string>
+               </property>
+              </widget>
+             </item>
+             <item>
+              <widget class="QLabel" name="label_est_tarifa_value">
+               <property name="font">
+                <font>
+                 <pointsize>16</pointsize>
+                 <bold>true</bold>
+                </font>
+               </property>
+               <property name="alignment">
+                <set>Qt::AlignCenter</set>
+               </property>
+               <property name="text">
+                <string>$ 0.00</string>
+               </property>
+              </widget>
+             </item>
+            </layout>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="group_est_registro">
+         <property name="title">
+          <string>Registro por hora</string>
+         </property>
+         <layout class="QVBoxLayout" name="est_registro_layout">
+          <item>
+           <layout class="QFormLayout" name="est_form_layout">
+            <item row="0" column="0">
+             <widget class="QLabel" name="label_est_patente">
+              <property name="text">
+               <string>Patente</string>
+              </property>
+             </widget>
+            </item>
+            <item row="0" column="1">
+             <widget class="QLineEdit" name="input_patente_est"/>
+            </item>
+            <item row="1" column="0">
+             <widget class="QLabel" name="label_est_espacio">
+              <property name="text">
+               <string>Espacio (opcional)</string>
+              </property>
+             </widget>
+            </item>
+            <item row="1" column="1">
+             <widget class="QLineEdit" name="input_espacio_est"/>
+            </item>
+            <item row="2" column="0">
+             <widget class="QLabel" name="label_est_metodo">
+              <property name="text">
+               <string>Metodo pago</string>
+              </property>
+             </widget>
+            </item>
+            <item row="2" column="1">
+             <widget class="QComboBox" name="combo_metodo_est">
+              <item>
+               <property name="text">
+                <string>Efectivo</string>
+               </property>
+              </item>
+              <item>
+               <property name="text">
+                <string>Tarjeta</string>
+               </property>
+              </item>
+              <item>
+               <property name="text">
+                <string>Transferencia</string>
+               </property>
+              </item>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="est_buttons_layout">
+            <item>
+             <widget class="QPushButton" name="btn_ingreso_est">
+              <property name="text">
+               <string>Registrar ingreso</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="btn_salida_est">
+              <property name="text">
+               <string>Registrar salida</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_resultado_est">
+            <property name="text">
+             <string></string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="group_est_activos">
+         <property name="title">
+          <string>Vehiculos en playa</string>
+         </property>
+         <layout class="QVBoxLayout" name="est_activos_layout">
+          <item>
+           <widget class="QTableWidget" name="table_est_activos">
+            <property name="columnCount">
+             <number>3</number>
+            </property>
+            <column>
+             <property name="text">
+              <string>Patente</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Espacio</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Ingreso</string>
+             </property>
+            </column>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>900</width>
+     <height>33</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
