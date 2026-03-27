@@ -8404,6 +8404,7 @@ class ReportesDialog(QDialog):
         self.setMinimumWidth(720)
         self._tipo_inicial = (tipo_inicial or "Todos").strip()
         self._es_dueno = (getattr(parent, "rol", "") or "").strip().upper() == "DUENO"
+        self._detalle_cache = []
         self._detalle_filtrado_cache = []
 
         layout = QVBoxLayout(self)
