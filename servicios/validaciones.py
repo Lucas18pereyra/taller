@@ -37,3 +37,18 @@ def cliente_tiene_movimiento_activo(cur, id_cliente):
     )
     row = cur.fetchone()
     return row
+
+
+def espacio_tiene_movimiento_activo(cur, id_espacio):
+    if id_espacio is None:
+        return None
+    cur.execute(
+        "SELECT v.patente, e.codigo "
+        "FROM movimientos m "
+        "JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
+        "LEFT JOIN espacios e ON e.id_espacio = m.id_espacio "
+        "WHERE m.id_espacio = ? AND m.fecha_salida IS NULL "
+        "ORDER BY m.fecha_ingreso LIMIT 1",
+        (id_espacio,),
+    )
+    return cur.fetchone()

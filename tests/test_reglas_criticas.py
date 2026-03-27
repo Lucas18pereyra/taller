@@ -13,6 +13,8 @@ from servicios.cobro import (
 )
 from servicios.contratos import (
     calcular_nueva_fecha_vencimiento,
+    obtener_detalle_contrato,
+    obtener_patente_por_dni,
     registrar_primer_pago_contrato,
     registrar_renovacion_contrato,
 )
@@ -28,6 +30,12 @@ from servicios.caja import (
 )
 from servicios.backups import crear_backup_db, restaurar_backup_db
 import main as app_main
+
+
+def _tmp_dir_tests():
+    base = Path(tempfile.gettempdir()) / "cochera_app_tests"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
 
 
 class CobroPorHoraTests(unittest.TestCase):
@@ -65,7 +73,7 @@ class CobroPorHoraTests(unittest.TestCase):
 
 class ExclusividadPatenteTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory(dir=_tmp_dir_tests())
         self._db_original = database.DB_PATH
         database.DB_PATH = Path(self._tmp.name) / "test_estacionamiento.db"
         init_db()
@@ -211,7 +219,7 @@ class ExclusividadPatenteTests(unittest.TestCase):
 
 class ContratosPagoTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory(dir=_tmp_dir_tests())
         self._db_original = database.DB_PATH
         database.DB_PATH = Path(self._tmp.name) / "test_estacionamiento.db"
         init_db()
@@ -260,17 +268,20 @@ class ContratosPagoTests(unittest.TestCase):
         self,
         id_cliente,
         id_espacio,
-        fecha_vencimiento="2026-03-13",
+        fecha_vencimiento=None,
         monto=20000,
         activo=0,
+        id_vehiculo=None,
     ):
+        if not fecha_vencimiento:
+            fecha_vencimiento = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO cochera_contratos "
-            "(id_cliente, id_espacio, fecha_vencimiento, monto_mensual, activo) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (id_cliente, id_espacio, fecha_vencimiento, monto, activo),
+            "(id_cliente, id_vehiculo, id_espacio, fecha_vencimiento, monto_mensual, activo) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (id_cliente, id_vehiculo, id_espacio, fecha_vencimiento, monto, activo),
         )
         contrato_id = cur.lastrowid
         conn.commit()
@@ -280,6 +291,7 @@ class ContratosPagoTests(unittest.TestCase):
     def test_primer_pago_activa_contrato_y_asigna_espacio(self):
         id_cliente = self._crear_cliente()
         id_espacio = self._crear_espacio("C2", reservado=1)
+        self._crear_vehiculo("AAA111", id_cliente=id_cliente)
         contrato_id = self._crear_contrato(id_cliente, id_espacio, activo=0)
 
         resultado = registrar_primer_pago_contrato(contrato_id, 20000, "Efectivo")
@@ -376,29 +388,56 @@ class ContratosPagoTests(unittest.TestCase):
             registrar_primer_pago_contrato(contrato_id, 20000, "Efectivo")
         self.assertIn("vencido", str(ctx.exception).lower())
 
-    def test_db_impide_dos_contratos_activos_mismo_cliente(self):
+    def test_contrato_guarda_la_patente_elegida(self):
+        id_cliente = self._crear_cliente(dni="30111226")
+        id_espacio = self._crear_espacio("C7", reservado=1)
+        self._crear_vehiculo("AAA111", id_cliente=id_cliente)
+        id_vehiculo_2 = self._crear_vehiculo("BBB222", id_cliente=id_cliente)
+
+        contrato_id = self._crear_contrato(
+            id_cliente,
+            id_espacio,
+            activo=0,
+            id_vehiculo=id_vehiculo_2,
+        )
+
+        detalle = obtener_detalle_contrato(contrato_id)
+        self.assertIsNotNone(detalle)
+        self.assertEqual(detalle["patente"], "BBB222")
+        self.assertEqual(obtener_patente_por_dni("30111226", "BBB222"), "BBB222")
+
+    def test_db_permite_dos_contratos_activos_mismo_cliente_si_son_patentes_distintas(self):
         id_cliente = self._crear_cliente(dni="30111226")
         id_espacio_1 = self._crear_espacio("C7", reservado=1)
         id_espacio_2 = self._crear_espacio("C8", reservado=1)
+        id_vehiculo_1 = self._crear_vehiculo("AAA111", id_cliente=id_cliente)
+        id_vehiculo_2 = self._crear_vehiculo("BBB222", id_cliente=id_cliente)
 
         conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO cochera_contratos "
-            "(id_cliente, id_espacio, fecha_vencimiento, monto_mensual, activo) "
-            "VALUES (?, ?, '2026-12-31', 20000, 1)",
-            (id_cliente, id_espacio_1),
-        )
-        conn.commit()
-        with self.assertRaises(sqlite3.IntegrityError):
+        try:
+            cur = conn.cursor()
             cur.execute(
                 "INSERT INTO cochera_contratos "
-                "(id_cliente, id_espacio, fecha_vencimiento, monto_mensual, activo) "
-                "VALUES (?, ?, '2026-12-31', 20000, 1)",
-                (id_cliente, id_espacio_2),
+                "(id_cliente, id_espacio, id_vehiculo, fecha_vencimiento, monto_mensual, activo) "
+                "VALUES (?, ?, ?, '2026-12-31', 20000, 1)",
+                (id_cliente, id_espacio_1, id_vehiculo_1),
+            )
+            cur.execute(
+                "INSERT INTO cochera_contratos "
+                "(id_cliente, id_espacio, id_vehiculo, fecha_vencimiento, monto_mensual, activo) "
+                "VALUES (?, ?, ?, '2026-12-31', 20000, 1)",
+                (id_cliente, id_espacio_2, id_vehiculo_2),
             )
             conn.commit()
-        conn.close()
+
+            cur.execute(
+                "SELECT COUNT(*) FROM cochera_contratos "
+                "WHERE id_cliente = ? AND activo = 1",
+                (id_cliente,),
+            )
+            self.assertEqual(cur.fetchone()[0], 2)
+        finally:
+            conn.close()
 
     def test_db_impide_dos_contratos_activos_mismo_espacio(self):
         id_cliente_1 = self._crear_cliente(dni="30111227")
@@ -435,7 +474,7 @@ class ContratosPagoTests(unittest.TestCase):
 
 class CajaCierreTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory(dir=_tmp_dir_tests())
         self._db_original = database.DB_PATH
         database.DB_PATH = Path(self._tmp.name) / "test_estacionamiento.db"
         init_db()
@@ -516,9 +555,118 @@ class CajaCierreTests(unittest.TestCase):
         self.assertIsNone(obtener_cierre_caja("2026-02-14"))
 
 
+class IntegridadBaseDatosTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(dir=_tmp_dir_tests())
+        self._db_original = database.DB_PATH
+        database.DB_PATH = Path(self._tmp.name) / "test_estacionamiento.db"
+        init_db()
+
+    def tearDown(self):
+        database.DB_PATH = self._db_original
+        self._tmp.cleanup()
+
+    def test_get_connection_activa_foreign_keys(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        self.assertEqual(cur.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+        conn.close()
+
+    def test_reparar_integridad_limpia_pagos_cochera_huerfanos(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO clientes (dni, nombre, activo) VALUES ('60111222', 'Marta', 1)")
+        id_cliente = cur.lastrowid
+        cur.execute(
+            "INSERT INTO espacios (codigo, es_reservado, activo) VALUES ('Z1', 1, 1)"
+        )
+        id_espacio = cur.lastrowid
+        cur.execute(
+            "INSERT INTO cochera_contratos "
+            "(id_cliente, id_espacio, fecha_vencimiento, monto_mensual, activo) "
+            "VALUES (?, ?, '2026-12-31', 18000, 0)",
+            (id_cliente, id_espacio),
+        )
+        id_contrato = cur.lastrowid
+        cur.execute(
+            "INSERT INTO pagos_cochera (id_contrato, monto, metodo) VALUES (?, 18000, 'Efectivo')",
+            (id_contrato,),
+        )
+        conn.commit()
+        conn.close()
+
+        raw = sqlite3.connect(database.DB_PATH)
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute("DELETE FROM cochera_contratos WHERE id_contrato = ?", (id_contrato,))
+        raw.commit()
+        raw.close()
+
+        self.assertEqual(len(database.validar_integridad_db()), 1)
+
+        reparaciones = database.reparar_integridad_db()
+        self.assertGreater(
+            reparaciones["pagos_cochera_sin_contrato"]
+            + reparaciones["pagos_cochera_sin_contrato_post"],
+            0,
+        )
+        self.assertEqual(database.validar_integridad_db(), [])
+
+    def test_db_impide_eliminar_vehiculo_con_movimientos(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO clientes (dni, nombre, activo) VALUES ('61111222', 'Luca', 1)")
+        id_cliente = cur.lastrowid
+        cur.execute(
+            "INSERT INTO vehiculos (patente, id_cliente) VALUES ('AAA111', ?)",
+            (id_cliente,),
+        )
+        id_vehiculo = cur.lastrowid
+        cur.execute(
+            "INSERT INTO espacios (codigo, es_reservado, activo) VALUES ('E20', 0, 1)"
+        )
+        id_espacio = cur.lastrowid
+        cur.execute(
+            "INSERT INTO movimientos (id_vehiculo, id_espacio) VALUES (?, ?)",
+            (id_vehiculo, id_espacio),
+        )
+        conn.commit()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            cur.execute("DELETE FROM vehiculos WHERE id_vehiculo = ?", (id_vehiculo,))
+            conn.commit()
+        conn.close()
+
+    def test_db_impide_eliminar_contrato_con_pagos(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO clientes (dni, nombre, activo) VALUES ('62111222', 'Nora', 1)")
+        id_cliente = cur.lastrowid
+        cur.execute(
+            "INSERT INTO espacios (codigo, es_reservado, activo) VALUES ('C20', 1, 1)"
+        )
+        id_espacio = cur.lastrowid
+        cur.execute(
+            "INSERT INTO cochera_contratos "
+            "(id_cliente, id_espacio, fecha_vencimiento, monto_mensual, activo) "
+            "VALUES (?, ?, '2026-12-31', 22000, 1)",
+            (id_cliente, id_espacio),
+        )
+        id_contrato = cur.lastrowid
+        cur.execute(
+            "INSERT INTO pagos_cochera (id_contrato, monto, metodo) VALUES (?, 22000, 'Transferencia')",
+            (id_contrato,),
+        )
+        conn.commit()
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            cur.execute("DELETE FROM cochera_contratos WHERE id_contrato = ?", (id_contrato,))
+            conn.commit()
+        conn.close()
+
+
 class FlujosIntegracionTests(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp = tempfile.TemporaryDirectory(dir=_tmp_dir_tests())
         self._db_original = database.DB_PATH
         database.DB_PATH = Path(self._tmp.name) / "test_estacionamiento.db"
         init_db()

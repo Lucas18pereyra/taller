@@ -1,12 +1,188 @@
 import sqlite3
+import sys
 from pathlib import Path
 
-DB_PATH = Path("estacionamiento.db")
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    _BASE_DIR = Path(__file__).resolve().parent
+
+DB_PATH = _BASE_DIR / "estacionamiento.db"
+
+
+def _configurar_conexion(conn):
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+    except sqlite3.Error:
+        pass
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+    except sqlite3.Error:
+        pass
+    return conn
+
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    db_path = Path(DB_PATH)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    return _configurar_conexion(conn)
+
+
+def validar_integridad_db(conn=None):
+    own_conn = conn is None
+    try:
+        conn = conn or get_connection()
+        cur = conn.cursor()
+        return [tuple(row) for row in cur.execute("PRAGMA foreign_key_check").fetchall()]
+    except sqlite3.Error:
+        return []
+    finally:
+        if own_conn and conn:
+            conn.close()
+
+
+def reparar_integridad_db(conn=None):
+    own_conn = conn is None
+    reparaciones = {}
+    try:
+        conn = conn or get_connection()
+        cur = conn.cursor()
+        operaciones = [
+            (
+                "vehiculos_sin_cliente",
+                "UPDATE vehiculos "
+                "SET id_cliente = NULL "
+                "WHERE id_cliente IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM clientes c WHERE c.id_cliente = vehiculos.id_cliente"
+                ")",
+            ),
+            (
+                "contratos_vehiculo_invalido",
+                "UPDATE cochera_contratos "
+                "SET id_vehiculo = NULL "
+                "WHERE id_vehiculo IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM vehiculos v "
+                "WHERE v.id_vehiculo = cochera_contratos.id_vehiculo "
+                "AND v.id_cliente = cochera_contratos.id_cliente"
+                ")",
+            ),
+            (
+                "contratos_sin_vehiculo",
+                "UPDATE cochera_contratos "
+                "SET id_vehiculo = ("
+                "SELECT v.id_vehiculo FROM vehiculos v "
+                "WHERE v.id_cliente = cochera_contratos.id_cliente "
+                "ORDER BY v.patente LIMIT 1"
+                ") "
+                "WHERE id_vehiculo IS NULL",
+            ),
+            (
+                "espacios_sin_cliente",
+                "UPDATE espacios "
+                "SET id_cliente = NULL "
+                "WHERE id_cliente IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM clientes c WHERE c.id_cliente = espacios.id_cliente"
+                ")",
+            ),
+            (
+                "pagos_sin_movimiento",
+                "DELETE FROM pagos "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM movimientos m WHERE m.id_movimiento = pagos.id_movimiento"
+                ")",
+            ),
+            (
+                "pagos_cochera_sin_contrato",
+                "DELETE FROM pagos_cochera "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM cochera_contratos cc "
+                "WHERE cc.id_contrato = pagos_cochera.id_contrato"
+                ")",
+            ),
+            (
+                "pagos_movimientos_invalidos",
+                "DELETE FROM pagos "
+                "WHERE id_movimiento IN ("
+                "SELECT m.id_movimiento "
+                "FROM movimientos m "
+                "LEFT JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
+                "LEFT JOIN espacios e ON e.id_espacio = m.id_espacio "
+                "WHERE v.id_vehiculo IS NULL OR e.id_espacio IS NULL"
+                ")",
+            ),
+            (
+                "movimientos_invalidos",
+                "DELETE FROM movimientos "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM vehiculos v WHERE v.id_vehiculo = movimientos.id_vehiculo"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM espacios e WHERE e.id_espacio = movimientos.id_espacio"
+                ")",
+            ),
+            (
+                "pagos_contratos_invalidos",
+                "DELETE FROM pagos_cochera "
+                "WHERE id_contrato IN ("
+                "SELECT cc.id_contrato "
+                "FROM cochera_contratos cc "
+                "LEFT JOIN clientes c ON c.id_cliente = cc.id_cliente "
+                "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
+                "WHERE c.id_cliente IS NULL OR e.id_espacio IS NULL"
+                ")",
+            ),
+            (
+                "contratos_invalidos",
+                "DELETE FROM cochera_contratos "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM clientes c WHERE c.id_cliente = cochera_contratos.id_cliente"
+                ") "
+                "OR NOT EXISTS ("
+                "SELECT 1 FROM espacios e WHERE e.id_espacio = cochera_contratos.id_espacio"
+                ")",
+            ),
+            (
+                "espacios_mapa_invalidos",
+                "DELETE FROM espacios_mapa "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM espacios e WHERE e.codigo = espacios_mapa.codigo"
+                ")",
+            ),
+            (
+                "pagos_sin_movimiento_post",
+                "DELETE FROM pagos "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM movimientos m WHERE m.id_movimiento = pagos.id_movimiento"
+                ")",
+            ),
+            (
+                "pagos_cochera_sin_contrato_post",
+                "DELETE FROM pagos_cochera "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM cochera_contratos cc "
+                "WHERE cc.id_contrato = pagos_cochera.id_contrato"
+                ")",
+            ),
+        ]
+        for clave, sql in operaciones:
+            cur.execute(sql)
+            reparaciones[clave] = max(0, int(cur.rowcount or 0))
+        conn.commit()
+        reparaciones["violaciones_restantes"] = len(validar_integridad_db(conn))
+        return reparaciones
+    except sqlite3.Error:
+        if conn:
+            conn.rollback()
+        reparaciones["violaciones_restantes"] = -1
+        return reparaciones
+    finally:
+        if own_conn and conn:
+            conn.close()
 
 
 def init_db():
@@ -36,6 +212,7 @@ def init_db():
         id_vehiculo INTEGER PRIMARY KEY AUTOINCREMENT,
         patente TEXT NOT NULL UNIQUE,
         modelo TEXT,
+        tipo_vehiculo TEXT DEFAULT 'AUTO',
         id_cliente INTEGER,
         FOREIGN KEY (id_cliente) REFERENCES clientes(id_cliente)
     );
@@ -52,12 +229,15 @@ def init_db():
     CREATE TABLE IF NOT EXISTS cochera_contratos (
         id_contrato INTEGER PRIMARY KEY AUTOINCREMENT,
         id_cliente INTEGER NOT NULL,
+        id_vehiculo INTEGER,
         id_espacio INTEGER NOT NULL,
         fecha_inicio DATE DEFAULT CURRENT_DATE,
         fecha_vencimiento DATE NOT NULL,
         monto_mensual REAL NOT NULL,
         activo INTEGER DEFAULT 1,
+        en_historial INTEGER DEFAULT 0,
         FOREIGN KEY (id_cliente) REFERENCES clientes(id_cliente),
+        FOREIGN KEY (id_vehiculo) REFERENCES vehiculos(id_vehiculo),
         FOREIGN KEY (id_espacio) REFERENCES espacios(id_espacio)
     );
 
@@ -107,7 +287,12 @@ def init_db():
     CREATE TABLE IF NOT EXISTS tarifas (
         id_tarifa INTEGER PRIMARY KEY AUTOINCREMENT,
         precio_hora REAL NOT NULL,
+        precio_hora_auto REAL,
+        precio_hora_moto REAL,
+        precio_hora_camioneta REAL,
         precio_mensual REAL DEFAULT 0,
+        precio_mensual_auto REAL,
+        precio_mensual_camioneta REAL,
         activa INTEGER DEFAULT 1,
         fecha_desde DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -195,28 +380,28 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_cierres_caja_metodos_fecha
         ON cierres_caja_metodos (fecha);
 
-    CREATE TRIGGER IF NOT EXISTS trg_contrato_activo_cliente_insert
+    CREATE TRIGGER IF NOT EXISTS trg_contrato_activo_vehiculo_insert
     BEFORE INSERT ON cochera_contratos
-    WHEN NEW.activo = 1
+    WHEN NEW.activo = 1 AND NEW.id_vehiculo IS NOT NULL
     BEGIN
-        SELECT RAISE(ABORT, 'cliente_ya_tiene_contrato_activo')
+        SELECT RAISE(ABORT, 'vehiculo_ya_tiene_contrato_activo')
         WHERE EXISTS (
             SELECT 1
             FROM cochera_contratos cc
-            WHERE cc.id_cliente = NEW.id_cliente
+            WHERE cc.id_vehiculo = NEW.id_vehiculo
               AND cc.activo = 1
         );
     END;
 
-    CREATE TRIGGER IF NOT EXISTS trg_contrato_activo_cliente_update
+    CREATE TRIGGER IF NOT EXISTS trg_contrato_activo_vehiculo_update
     BEFORE UPDATE ON cochera_contratos
-    WHEN NEW.activo = 1
+    WHEN NEW.activo = 1 AND NEW.id_vehiculo IS NOT NULL
     BEGIN
-        SELECT RAISE(ABORT, 'cliente_ya_tiene_contrato_activo')
+        SELECT RAISE(ABORT, 'vehiculo_ya_tiene_contrato_activo')
         WHERE EXISTS (
             SELECT 1
             FROM cochera_contratos cc
-            WHERE cc.id_cliente = NEW.id_cliente
+            WHERE cc.id_vehiculo = NEW.id_vehiculo
               AND cc.activo = 1
               AND cc.id_contrato <> NEW.id_contrato
         );
@@ -282,6 +467,74 @@ def init_db():
     except sqlite3.OperationalError:
         pass
     try:
+        cursor.execute("ALTER TABLE vehiculos ADD COLUMN tipo_vehiculo TEXT DEFAULT 'AUTO'")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "UPDATE vehiculos "
+            "SET tipo_vehiculo = CASE "
+            "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, ''))) IN ('MOTO', 'MOTOCICLETA') THEN 'MOTO' "
+            "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, ''))) IN ('CAMIONETA', 'PICKUP') THEN 'CAMIONETA' "
+            "ELSE 'AUTO' END"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vehiculos_tipo "
+            "ON vehiculos (tipo_vehiculo)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "ALTER TABLE cochera_contratos "
+            "ADD COLUMN id_vehiculo INTEGER REFERENCES vehiculos(id_vehiculo)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "UPDATE cochera_contratos "
+            "SET id_vehiculo = ("
+            "SELECT v.id_vehiculo FROM vehiculos v "
+            "WHERE v.id_cliente = cochera_contratos.id_cliente "
+            "ORDER BY v.patente LIMIT 1"
+            ") "
+            "WHERE id_vehiculo IS NULL"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "ALTER TABLE cochera_contratos "
+            "ADD COLUMN en_historial INTEGER DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "UPDATE cochera_contratos "
+            "SET en_historial = COALESCE(en_historial, 0)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_contratos_vehiculo_activo "
+            "ON cochera_contratos (id_vehiculo, activo)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_contratos_historial "
+            "ON cochera_contratos (en_historial, activo)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
         cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_hora_auto REAL")
     except sqlite3.OperationalError:
         pass
@@ -294,11 +547,21 @@ def init_db():
     except sqlite3.OperationalError:
         pass
     try:
+        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_mensual_auto REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_mensual_camioneta REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
         cursor.execute(
             "UPDATE tarifas SET "
             "precio_hora_auto = COALESCE(precio_hora_auto, precio_hora), "
             "precio_hora_moto = COALESCE(precio_hora_moto, precio_hora), "
-            "precio_hora_camioneta = COALESCE(precio_hora_camioneta, precio_hora)"
+            "precio_hora_camioneta = COALESCE(precio_hora_camioneta, precio_hora), "
+            "precio_mensual_auto = COALESCE(precio_mensual_auto, precio_mensual), "
+            "precio_mensual_camioneta = COALESCE(precio_mensual_camioneta, precio_mensual)"
         )
     except sqlite3.OperationalError:
         pass
@@ -315,6 +578,14 @@ def init_db():
         pass
     try:
         cursor.execute("ALTER TABLE vehiculos ADD COLUMN modelo TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("DROP TRIGGER IF EXISTS trg_contrato_activo_cliente_insert")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("DROP TRIGGER IF EXISTS trg_contrato_activo_cliente_update")
     except sqlite3.OperationalError:
         pass
     try:
@@ -360,6 +631,12 @@ def init_db():
             "ON pagos_cochera (usuario, fecha_pago)"
         )
     except sqlite3.OperationalError:
+        pass
+
+    reparar_integridad_db(conn=conn)
+    try:
+        cursor.execute("PRAGMA optimize")
+    except sqlite3.Error:
         pass
 
     conn.commit()

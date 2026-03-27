@@ -64,7 +64,7 @@ def consultar_detalle(mes_key):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT pc.fecha_pago, pc.monto, pc.metodo, "
+            "SELECT pc.id_pago, pc.fecha_pago, pc.monto, pc.metodo, "
             "COALESCE(pc.usuario, '') AS usuario, "
             "COALESCE(c.nombre, '') AS nombre, "
             "COALESCE(e.codigo, '') AS codigo, "
@@ -80,6 +80,7 @@ def consultar_detalle(mes_key):
         for row in cur.fetchall():
             detalle.append(
                 {
+                    "pago_id": row["id_pago"],
                     "tipo": "Cochera",
                     "fecha_pago": row["fecha_pago"],
                     "monto": row["monto"],
@@ -95,7 +96,7 @@ def consultar_detalle(mes_key):
             )
 
         cur.execute(
-            "SELECT p.fecha_pago, p.monto, p.metodo, "
+            "SELECT p.id_pago, p.fecha_pago, p.monto, p.metodo, "
             "COALESCE(p.usuario, '') AS usuario, "
             "COALESCE(m.tipo_vehiculo, 'AUTO') AS tipo_vehiculo, "
             "COALESCE(v.patente, '') AS patente, "
@@ -112,6 +113,7 @@ def consultar_detalle(mes_key):
         for row in cur.fetchall():
             detalle.append(
                 {
+                    "pago_id": row["id_pago"],
                     "tipo": "Estacionamiento",
                     "fecha_pago": row["fecha_pago"],
                     "monto": row["monto"],
@@ -140,7 +142,7 @@ def consultar_detalle_rango(desde_key, hasta_key):
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT pc.fecha_pago, pc.monto, pc.metodo, "
+            "SELECT pc.id_pago, pc.fecha_pago, pc.monto, pc.metodo, "
             "COALESCE(pc.usuario, '') AS usuario, "
             "COALESCE(c.nombre, '') AS nombre, "
             "COALESCE(e.codigo, '') AS codigo, "
@@ -156,6 +158,7 @@ def consultar_detalle_rango(desde_key, hasta_key):
         for row in cur.fetchall():
             detalle.append(
                 {
+                    "pago_id": row["id_pago"],
                     "tipo": "Cochera",
                     "fecha_pago": row["fecha_pago"],
                     "monto": row["monto"],
@@ -171,7 +174,7 @@ def consultar_detalle_rango(desde_key, hasta_key):
             )
 
         cur.execute(
-            "SELECT p.fecha_pago, p.monto, p.metodo, "
+            "SELECT p.id_pago, p.fecha_pago, p.monto, p.metodo, "
             "COALESCE(p.usuario, '') AS usuario, "
             "COALESCE(m.tipo_vehiculo, 'AUTO') AS tipo_vehiculo, "
             "COALESCE(v.patente, '') AS patente, "
@@ -188,6 +191,7 @@ def consultar_detalle_rango(desde_key, hasta_key):
         for row in cur.fetchall():
             detalle.append(
                 {
+                    "pago_id": row["id_pago"],
                     "tipo": "Estacionamiento",
                     "fecha_pago": row["fecha_pago"],
                     "monto": row["monto"],

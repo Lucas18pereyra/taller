@@ -113,6 +113,14 @@ def restaurar_backup_db(path_backup):
             dst.commit()
         except sqlite3.Error:
             pass
+        try:
+            dst.close()
+            dst = None
+            src.close()
+            src = None
+            database.init_db()
+        except sqlite3.Error:
+            return False
         return True
     except sqlite3.Error:
         return False

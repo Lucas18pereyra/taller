@@ -5,4 +5,10 @@ __pycache__/
 *.pyd
 build/
 dist/
+dist_installer/
 *.log
+tests/.tmp_tests/
+tests/tmp*/
+tickets_salida_test/
+comprobantes/*.pdf
+reportes/*.xlsx

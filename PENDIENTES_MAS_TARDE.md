@@ -8,13 +8,13 @@ Cuando digas: `Hagamos lo que te dije que guardes para mas tarde`
 
 se retoma este bloque.
 
-## 8) Empaquetado profesional del .exe
+## 8) Empaquetado profesional del .exe (base implementada)
 
-1. Agregar icono definitivo `.ico` para el ejecutable.
-2. Incluir metadatos de version (producto, compania, version de archivo).
-3. Generar instalador con `Inno Setup` (instalacion, desinstalacion, acceso directo).
-4. Crear script de build reproducible (`build_exe.bat`/`build_exe.ps1`).
-5. Verificar arranque en maquina limpia (sin entorno de desarrollo).
+1. Icono `.ico` agregado en `assets/app_icon.ico` (reemplazable por uno final).
+2. Metadatos de version listos en `installer/version_info.txt`.
+3. Script de instalador Inno Setup listo en `installer/EstacionamientoApp.iss`.
+4. Build reproducible listo en `build_exe.ps1` y `build_exe.bat`.
+5. Falta pendiente solo la prueba en maquina limpia.
 
 ## Modo facil (pendiente)
 
