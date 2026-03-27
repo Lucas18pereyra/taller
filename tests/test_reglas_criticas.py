@@ -317,6 +317,28 @@ class ContratosPagoTests(unittest.TestCase):
         self.assertEqual(cur.fetchone()[0], 1)
         conn.close()
 
+    def test_primer_pago_guarda_fecha_local_explicita(self):
+        id_cliente = self._crear_cliente(dni="30111221")
+        id_espacio = self._crear_espacio("C2B", reservado=1)
+        self._crear_vehiculo("AAA112", id_cliente=id_cliente)
+        contrato_id = self._crear_contrato(id_cliente, id_espacio, activo=0)
+
+        registrar_primer_pago_contrato(
+            contrato_id,
+            20000,
+            "Efectivo",
+            fecha_pago="2026-03-26 21:45:00",
+        )
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT fecha_pago FROM pagos_cochera WHERE id_contrato = ?",
+            (contrato_id,),
+        )
+        self.assertEqual(cur.fetchone()["fecha_pago"], "2026-03-26 21:45:00")
+        conn.close()
+
     def test_primer_pago_rechaza_si_cliente_esta_en_estacionamiento(self):
         id_cliente = self._crear_cliente()
         id_espacio_cochera = self._crear_espacio("C3", reservado=1)
@@ -373,6 +395,35 @@ class ContratosPagoTests(unittest.TestCase):
             hoy="2026-02-01",
         )
         self.assertEqual(nueva, "2026-03-01")
+
+    def test_renovacion_guarda_fecha_local_explicita(self):
+        id_cliente = self._crear_cliente(dni="30111224")
+        id_espacio = self._crear_espacio("C5B", reservado=1)
+        contrato_id = self._crear_contrato(
+            id_cliente,
+            id_espacio,
+            fecha_vencimiento="2026-02-20",
+            activo=1,
+        )
+
+        registrar_renovacion_contrato(
+            contrato_id,
+            meses=1,
+            monto=20000,
+            metodo="Transferencia",
+            hoy="2026-02-01",
+            fecha_pago="2026-03-26 22:10:00",
+        )
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT fecha_pago FROM pagos_cochera WHERE id_contrato = ? "
+            "ORDER BY id_pago DESC LIMIT 1",
+            (contrato_id,),
+        )
+        self.assertEqual(cur.fetchone()["fecha_pago"], "2026-03-26 22:10:00")
+        conn.close()
 
     def test_primer_pago_rechaza_si_contrato_esta_vencido(self):
         id_cliente = self._crear_cliente(dni="30111225")
@@ -611,6 +662,53 @@ class IntegridadBaseDatosTests(unittest.TestCase):
         )
         self.assertEqual(database.validar_integridad_db(), [])
 
+    def test_init_db_migra_fechas_legacy_de_pagos_cochera_a_hora_local(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM configuracion WHERE clave = 'migracion_pagos_cochera_local_v1'")
+        cur.execute("INSERT INTO clientes (dni, nombre, activo) VALUES ('60111223', 'Mario', 1)")
+        id_cliente = cur.lastrowid
+        cur.execute(
+            "INSERT INTO espacios (codigo, es_reservado, activo) VALUES ('Z2', 1, 1)"
+        )
+        id_espacio = cur.lastrowid
+        cur.execute(
+            "INSERT INTO cochera_contratos "
+            "(id_cliente, id_espacio, fecha_vencimiento, monto_mensual, activo) "
+            "VALUES (?, ?, '2026-12-31', 18000, 1)",
+            (id_cliente, id_espacio),
+        )
+        id_contrato = cur.lastrowid
+        cur.execute(
+            "INSERT INTO pagos_cochera (id_contrato, monto, metodo, fecha_pago) "
+            "VALUES (?, 18000, 'Efectivo', '2026-03-27 00:15:00')",
+            (id_contrato,),
+        )
+        conn.commit()
+        conn.close()
+
+        offset = datetime.now().astimezone().utcoffset()
+        offset_min = int((offset.total_seconds() // 60) if offset else 0)
+        esperado = datetime(2026, 3, 27, 0, 15, 0) + timedelta(minutes=offset_min)
+
+        init_db()
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT fecha_pago FROM pagos_cochera WHERE id_contrato = ?",
+            (id_contrato,),
+        )
+        self.assertEqual(
+            cur.fetchone()["fecha_pago"],
+            esperado.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        cur.execute(
+            "SELECT valor FROM configuracion WHERE clave = 'migracion_pagos_cochera_local_v1'"
+        )
+        self.assertEqual(cur.fetchone()["valor"], "1")
+        conn.close()
+
     def test_db_impide_eliminar_vehiculo_con_movimientos(self):
         conn = get_connection()
         cur = conn.cursor()
@@ -737,6 +835,29 @@ class FlujosIntegracionTests(unittest.TestCase):
         self.assertEqual(app_main._tarifa_hora_desde_row(row, "AUTO"), 1000.0)
         self.assertEqual(app_main._tarifa_hora_desde_row(row, "MOTO"), 600.0)
         self.assertEqual(app_main._tarifa_hora_desde_row(row, "CAMIONETA"), 1500.0)
+
+    def test_whatsapp_admite_variable_cuota_en_plantilla(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO configuracion (clave, valor) VALUES (?, ?) "
+            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            (
+                "wa_recordatorio_template",
+                "Hola {nombre}. Vence: {vencimiento}. Nueva cuota: {cuota}.",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        mensaje = app_main._render_mensaje_whatsapp(
+            "Lucas",
+            "26/03/2026 (vence hoy)",
+            "$ 10000.00",
+            modelo="Cronos",
+            patente="AAA111",
+        )
+        self.assertIn("Nueva cuota: $ 10000.00", mensaje)
 
 
 if __name__ == "__main__":

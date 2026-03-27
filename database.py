@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
 if getattr(sys, "frozen", False):
@@ -183,6 +184,33 @@ def reparar_integridad_db(conn=None):
     finally:
         if own_conn and conn:
             conn.close()
+
+
+def _migrar_fechas_pagos_cochera_utc_a_local(cursor):
+    try:
+        cursor.execute(
+            "SELECT valor FROM configuracion "
+            "WHERE clave = 'migracion_pagos_cochera_local_v1'"
+        )
+        row = cursor.fetchone()
+        if row and str(row["valor"] or "").strip() == "1":
+            return
+        offset = datetime.now().astimezone().utcoffset()
+        offset_min = int((offset.total_seconds() // 60) if offset else 0)
+        if offset_min:
+            cursor.execute(
+                "UPDATE pagos_cochera "
+                "SET fecha_pago = datetime(fecha_pago, ?) "
+                "WHERE fecha_pago IS NOT NULL AND TRIM(fecha_pago) <> ''",
+                (f"{offset_min:+d} minutes",),
+            )
+        cursor.execute(
+            "INSERT INTO configuracion (clave, valor) VALUES (?, ?) "
+            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            ("migracion_pagos_cochera_local_v1", "1"),
+        )
+    except sqlite3.Error:
+        pass
 
 
 def init_db():
@@ -632,6 +660,7 @@ def init_db():
         )
     except sqlite3.OperationalError:
         pass
+    _migrar_fechas_pagos_cochera_utc_a_local(cursor)
 
     reparar_integridad_db(conn=conn)
     try:

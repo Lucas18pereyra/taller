@@ -22,6 +22,30 @@ def _normalizar_patente(texto):
     return "".join(str(texto or "").upper().split())
 
 
+def _fecha_pago_db(fecha_pago=None):
+    if isinstance(fecha_pago, datetime):
+        dt = fecha_pago
+    else:
+        texto = str(fecha_pago or "").strip()
+        if texto:
+            for fmt in (
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%d/%m/%Y %H:%M:%S",
+                "%d/%m/%Y %H:%M",
+            ):
+                try:
+                    dt = datetime.strptime(texto, fmt)
+                    break
+                except ValueError:
+                    pass
+            else:
+                raise ValueError("La fecha de pago no tiene un formato valido.")
+        else:
+            dt = datetime.now()
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def listar_vehiculos_por_dni(dni):
     dni = (dni or "").strip()
     if not dni:
@@ -236,6 +260,7 @@ def registrar_primer_pago_contrato(
     metodo,
     ref_externa=None,
     usuario=None,
+    fecha_pago=None,
 ):
     monto = float(monto or 0.0)
     if monto <= 0:
@@ -381,14 +406,16 @@ def registrar_primer_pago_contrato(
                 )
 
         cur.execute(
-            "INSERT INTO pagos_cochera (id_contrato, monto, metodo, ref_externa, usuario) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO pagos_cochera "
+            "(id_contrato, monto, metodo, ref_externa, usuario, fecha_pago) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 id_contrato,
                 monto,
                 metodo,
                 (ref_externa or "").strip() or None,
                 (usuario or "").strip() or None,
+                _fecha_pago_db(fecha_pago),
             ),
         )
         cur.execute(
@@ -419,6 +446,7 @@ def registrar_renovacion_contrato(
     hoy=None,
     ref_externa=None,
     usuario=None,
+    fecha_pago=None,
 ):
     meses = int(meses or 0)
     monto = float(monto or 0.0)
@@ -471,14 +499,16 @@ def registrar_renovacion_contrato(
             hoy=hoy,
         )
         cur.execute(
-            "INSERT INTO pagos_cochera (id_contrato, monto, metodo, ref_externa, usuario) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO pagos_cochera "
+            "(id_contrato, monto, metodo, ref_externa, usuario, fecha_pago) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 id_contrato,
                 monto,
                 metodo,
                 (ref_externa or "").strip() or None,
                 (usuario or "").strip() or None,
+                _fecha_pago_db(fecha_pago),
             ),
         )
         cur.execute(

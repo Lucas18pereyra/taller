@@ -592,6 +592,7 @@ def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
     nombre_txt = (nombre or "").strip() or "cliente"
     venc_txt = (vencimiento or "").strip() or "sin vencimiento"
     deuda_txt = (deuda or "").strip() or "$ 0.00"
+    cuota_txt = deuda_txt
     modelo_txt = (modelo or "").strip()
     patente_txt = _formatear_patente(patente or "").strip() or "-"
     modelo_extra = f" Modelo del vehiculo: {modelo_txt}." if modelo_txt else ""
@@ -601,6 +602,7 @@ def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
             nombre=nombre_txt,
             vencimiento=venc_txt,
             deuda=deuda_txt,
+            cuota=cuota_txt,
             modelo=modelo_txt,
             modelo_extra=modelo_extra,
             patente=patente_txt,
@@ -611,6 +613,7 @@ def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
             nombre=nombre_txt,
             vencimiento=venc_txt,
             deuda=deuda_txt,
+            cuota=cuota_txt,
             modelo=modelo_txt,
             modelo_extra=modelo_extra,
             patente=patente_txt,
@@ -3505,18 +3508,14 @@ class ContratosDialog(QDialog):
                 vencimiento = f"{base} (en {dias} dia/s)"
         else:
             dias_para_vencimiento = None
-        deuda_total = (
-            monto * self._meses_mora_whatsapp(fecha_venc, hoy)
-            if int(row.get("activo") or 0) == 1
-            else 0.0
-        )
+        cuota_actual = monto if monto > 0 else 0.0
         return {
             "nombre": nombre,
             "telefono": telefono,
             "modelo": modelo,
             "patente": _formatear_patente(row.get("patente") or ""),
             "vencimiento": vencimiento,
-            "deuda": f"$ {deuda_total:.2f}",
+            "deuda": f"$ {cuota_actual:.2f}",
             "activo": int(row.get("activo") or 0),
             "dias_para_vencimiento": dias_para_vencimiento,
         }
@@ -7403,6 +7402,36 @@ class MapaCocheraDialog(QDialog):
         parent.activateWindow()
         self.accept()
 
+    def _abrir_salida_desde_mapa(self, item, movimiento):
+        parent = self.parent()
+        if not parent or not hasattr(parent, "ui"):
+            return False
+        if hasattr(parent, "_abrir_menu_estacionamiento"):
+            if not parent._abrir_menu_estacionamiento(popup_parent=self):
+                return False
+        else:
+            parent.ui.stack.setCurrentIndex(1)
+
+        patente = _formatear_patente((movimiento["patente"] or "").strip())
+        parent.ui.input_patente_est.setText(patente)
+        parent.ui.input_espacio_est.setText((item.codigo or "").strip().upper())
+
+        if hasattr(parent.ui, "combo_metodo_est"):
+            try:
+                parent.ui.combo_metodo_est.setFocus()
+            except Exception:
+                pass
+        elif hasattr(parent.ui, "btn_salida_est"):
+            try:
+                parent.ui.btn_salida_est.setFocus()
+            except Exception:
+                pass
+
+        parent.raise_()
+        parent.activateWindow()
+        self.accept()
+        return True
+
     def _desocupar_desde_mapa(self, item):
         codigo = item.codigo
         conn = None
@@ -7430,11 +7459,16 @@ class MapaCocheraDialog(QDialog):
                 "FROM movimientos m "
                 "JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
                 "WHERE m.id_espacio = ? AND m.fecha_salida IS NULL "
-                "ORDER BY m.fecha_ingreso",
+                "ORDER BY m.fecha_ingreso DESC",
                 (id_espacio,),
             )
             movimientos_activos = cur.fetchall()
             mov_activos = len(movimientos_activos)
+
+            if mov_activos > 0:
+                movimiento = movimientos_activos[0]
+                if self._abrir_salida_desde_mapa(item, movimiento):
+                    return
 
             cur.execute(
                 "SELECT COUNT(*) FROM cochera_contratos WHERE id_espacio = ? AND activo = 1",
@@ -8090,20 +8124,13 @@ class VencimientosDialog(QDialog):
                 vencimiento = f"{base} (vence hoy)"
             else:
                 vencimiento = f"{base} (en {dias} dia/s)"
-        deuda_total = 0.0
-        if fecha_venc.isValid() and fecha_venc < hoy and monto > 0:
-            meses = 0
-            cursor = fecha_venc
-            while cursor < hoy and meses < 240:
-                meses += 1
-                cursor = cursor.addMonths(1)
-            deuda_total = monto * meses
+        cuota_actual = monto if monto > 0 else 0.0
         return {
             "nombre": nombre,
             "telefono": (row.get("telefono") or "").strip(),
             "modelo": modelo,
             "vencimiento": vencimiento,
-            "deuda": f"$ {deuda_total:.2f}",
+            "deuda": f"$ {cuota_actual:.2f}",
             "codigo": (row.get("codigo") or "").strip() or "-",
             "patente": _formatear_patente(row.get("patente") or ""),
             "id_contrato": row.get("id_contrato"),
@@ -9769,13 +9796,14 @@ class ConfiguracionDialog(QDialog):
             "{nombre}: reemplaza por el nombre del cliente.\n"
             "{vencimiento}: reemplaza por el vencimiento del contrato seleccionado.\n"
             "{deuda}: reemplaza por el valor de la nueva cuota del contrato.\n"
+            "{cuota}: alias de {deuda} para usar el nombre mas claro.\n"
             "{patente}: reemplaza por la patente con formato (AA 123 AA o AAA 123).\n"
             "{patente_extra}: agrega texto de patente solo si hay patente cargada.\n"
             "{modelo}: reemplaza por el modelo del vehiculo asociado (si existe).\n"
             "{modelo_extra}: agrega texto de modelo solo si hay modelo cargado.\n"
             "Escribilas tal cual, entre llaves.\n"
             "Ejemplo: Hola {nombre}, tu vencimiento es {vencimiento}. "
-            "Patente: {patente}. Nueva cuota: {deuda}.{modelo_extra}"
+            "Patente: {patente}. Nueva cuota: {cuota}.{modelo_extra}"
         )
         ayuda_wa.setObjectName("help_whatsapp")
         ayuda_wa.setWordWrap(True)
