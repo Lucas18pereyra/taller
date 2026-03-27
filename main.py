@@ -981,26 +981,66 @@ def _tipos_vehiculo_config_estacionamiento():
     return tipos
 
 
-def _reportes_dir():
-    valor = (_config_get("dir_reportes", "") or "").strip()
-    carpeta = Path(valor) if valor else (Path(__file__).resolve().parent / "reportes")
+def _escritorio_base_actual():
+    candidatos = [
+        Path.home() / "Desktop",
+        Path.home() / "OneDrive" / "Desktop",
+    ]
+    for candidato in candidatos:
+        if candidato.exists():
+            return candidato
+    return candidatos[0]
+
+
+def _resolver_directorio_app(clave_config, fallback_relativo):
+    valor = (_config_get(clave_config, "") or "").strip()
+    app_dir = Path(__file__).resolve().parent
+    candidatos = []
+
+    if valor:
+        ruta_configurada = Path(valor).expanduser()
+        candidatos.append(ruta_configurada)
+
+        nombre = ruta_configurada.name.strip()
+        if nombre:
+            candidatos.append(_escritorio_base_actual() / nombre)
+
+    candidatos.append(app_dir / fallback_relativo)
+
+    vistos = set()
+    for carpeta in candidatos:
+        carpeta_txt = str(carpeta)
+        if not carpeta_txt or carpeta_txt in vistos:
+            continue
+        vistos.add(carpeta_txt)
+        try:
+            carpeta.mkdir(parents=True, exist_ok=True)
+            if valor and carpeta_txt != valor:
+                _config_set(clave_config, carpeta_txt)
+            return carpeta
+        except OSError:
+            continue
+
+    carpeta = app_dir / fallback_relativo
     carpeta.mkdir(parents=True, exist_ok=True)
+    if valor and str(carpeta) != valor:
+        _config_set(clave_config, str(carpeta))
     return carpeta
+
+
+def _reportes_dir():
+    return _resolver_directorio_app("dir_reportes", "reportes")
 
 
 def _comprobantes_dir():
-    valor = (_config_get("dir_comprobantes", "") or "").strip()
-    carpeta = Path(valor) if valor else (Path(__file__).resolve().parent / "comprobantes")
-    carpeta.mkdir(parents=True, exist_ok=True)
-    return carpeta
+    return _resolver_directorio_app("dir_comprobantes", "comprobantes")
 
 
 def _tickets_salida_dir():
     valor = (_config_get("dir_tickets_salida", "") or "").strip()
     if valor:
-        carpeta = Path(valor)
-    else:
-        carpeta = _comprobantes_dir() / "tickets_salida"
+        return _resolver_directorio_app("dir_tickets_salida", "tickets_salida")
+    carpeta = _comprobantes_dir() / "tickets_salida"
     carpeta.mkdir(parents=True, exist_ok=True)
     return carpeta
 
@@ -3038,6 +3078,18 @@ class ContratosDialog(QDialog):
     def _actualizar_snapshot_form(self):
         self._form_snapshot = self._snapshot_form()
 
+    def _limpiar_form_contrato(self):
+        self._patente_preferida = ""
+        self.input_dni.clear()
+        self.input_patente.clear()
+        self.input_modelo.clear()
+        self.input_tipo_vehiculo.clear()
+        self.input_espacio.clear()
+        self.input_venc.setDate(QDate.currentDate().addMonths(1))
+        self._cargar_tarifa_mensual()
+        self._actualizar_acciones_pago()
+        self._actualizar_snapshot_form()
+
     def _hay_cambios_sin_guardar(self):
         # Solo cuenta como pendiente si se esta cargando un nuevo contrato.
         id_contrato, _ = self._selected_ids()
@@ -3185,6 +3237,8 @@ class ContratosDialog(QDialog):
                 item_cliente.setToolTip("Cliente desactivado: contrato solo lectura.")
         if id_contrato_previo and id_contrato_previo in visible_ids:
             self._seleccionar_contrato(id_contrato_previo)
+        elif not visible_ids and not self._hay_cambios_sin_guardar():
+            self._limpiar_form_contrato()
         self._actualizar_acciones_pago()
         self._actualizar_snapshot_form()
 
@@ -3713,11 +3767,17 @@ class ContratosDialog(QDialog):
     def _seleccion_changed(self):
         id_contrato, _ = self._selected_ids()
         if not id_contrato:
+            if not self._hay_cambios_sin_guardar():
+                self._limpiar_form_contrato()
+                return
             self._actualizar_acciones_pago()
             self._actualizar_snapshot_form()
             return
         row = svc_obtener_detalle_contrato(id_contrato)
         if not row:
+            if not self._hay_cambios_sin_guardar():
+                self._limpiar_form_contrato()
+                return
             return
         self.input_dni.setText(row["dni"] or "")
         self.input_patente.setText(row["patente"] or "")
@@ -9855,14 +9915,7 @@ class ConfiguracionDialog(QDialog):
             input_destino.setText(carpeta)
 
     def _carpeta_escritorio_base(self):
-        candidatos = [
-            Path.home() / "Desktop",
-            Path.home() / "OneDrive" / "Desktop",
-        ]
-        for candidato in candidatos:
-            if candidato.exists():
-                return candidato
-        return candidatos[0]
+        return _escritorio_base_actual()
 
     def _crear_carpetas_escritorio(self):
         base = self._carpeta_escritorio_base()
