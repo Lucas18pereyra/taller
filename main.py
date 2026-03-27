@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QUrl,
     QRegularExpression,
     QStringListModel,
+    QLocale,
 )
 from PySide6.QtGui import (
     QAction,
@@ -502,6 +503,40 @@ def _fmt_fecha_hora_local(valor):
     return dt.strftime("%d/%m/%Y %H:%M:%S")
 
 
+_LOCALE_ES_AR = QLocale(QLocale.Spanish, QLocale.Argentina)
+try:
+    _LOCALE_ES_AR.setNumberOptions(
+        _LOCALE_ES_AR.numberOptions() & ~QLocale.RejectGroupSeparator
+    )
+except Exception:
+    pass
+
+
+def _fmt_numero_local(valor, decimales=2):
+    try:
+        numero = float(valor or 0.0)
+    except (TypeError, ValueError):
+        numero = 0.0
+    return _LOCALE_ES_AR.toString(numero, "f", max(0, int(decimales or 0)))
+
+
+def _fmt_money(valor, decimales=2):
+    return f"$ {_fmt_numero_local(valor, decimales=decimales)}"
+
+
+def _configurar_spinbox_numerico(spinbox):
+    if spinbox is None:
+        return
+    try:
+        spinbox.setLocale(_LOCALE_ES_AR)
+    except Exception:
+        pass
+    try:
+        spinbox.setGroupSeparatorShown(True)
+    except Exception:
+        pass
+
+
 def _horas_cobradas_con_tolerancia(segundos, tolerancia_min=15):
     return svc_horas_cobradas_tolerancia(segundos, tolerancia_min=tolerancia_min)
 
@@ -535,6 +570,19 @@ def _texto_tipo_vehiculo(tipo):
 
 def _solo_digitos(texto):
     return "".join(ch for ch in str(texto or "") if ch.isdigit())
+
+
+def _formatear_documento(texto):
+    digitos = _solo_digitos(texto)
+    if not digitos:
+        return ""
+    grupos = []
+    while len(digitos) > 3:
+        grupos.insert(0, digitos[-3:])
+        digitos = digitos[:-3]
+    if digitos:
+        grupos.insert(0, digitos)
+    return ".".join(grupos)
 
 
 def _normalizar_patente(texto):
@@ -1453,13 +1501,13 @@ def _emitir_comprobante_cochera(id_contrato, monto, metodo, meses, nueva_venc):
     lineas = [
         ("Tipo", "Cochera"),
         ("Cliente", pago.get("nombre") or "-"),
-        ("DNI", pago.get("dni") or "-"),
+        ("DNI", _formatear_documento(pago.get("dni")) or "-"),
         ("Telefono", pago.get("telefono") or "-"),
         ("Patente", pago.get("patente") or "-"),
         ("Modelo", pago.get("modelo") or "-"),
         ("Espacio", pago.get("codigo") or "-"),
         ("Concepto", concepto),
-        ("Monto", f"$ {monto:.2f}"),
+        ("Monto", _fmt_money(monto)),
         ("Metodo", metodo),
         (
             "Fecha del pago",
@@ -1528,7 +1576,7 @@ def _emitir_comprobante_ultimo_pago_contrato(id_contrato):
     lineas = [
         ("Tipo", "Cochera"),
         ("Cliente", pago.get("nombre") or "-"),
-        ("DNI", pago.get("dni") or "-"),
+        ("DNI", _formatear_documento(pago.get("dni")) or "-"),
         ("Telefono", pago.get("telefono") or "-"),
         ("Patente", pago.get("patente") or "-"),
         ("Modelo", pago.get("modelo") or "-"),
@@ -1537,7 +1585,7 @@ def _emitir_comprobante_ultimo_pago_contrato(id_contrato):
             "Fecha del pago",
             fecha_pago.strftime("%d/%m/%Y %H:%M") if fecha_pago else str(pago.get("fecha_pago") or "-"),
         ),
-        ("Monto", f"$ {float(pago.get('monto') or 0.0):.2f}"),
+        ("Monto", _fmt_money(float(pago.get("monto") or 0.0))),
         ("Metodo", pago.get("metodo") or "-"),
         (
             "Vencimiento actual",
@@ -1580,7 +1628,7 @@ def _emitir_estado_cuenta_pdf(data):
                     f"Espacio {row.get('espacio') or '-'} | "
                     f"{row.get('vencimiento') or '-'} | "
                     f"{row.get('estado') or '-'} | "
-                    f"Deuda: $ {float(row.get('deuda') or 0.0):.2f}"
+                    f"Deuda: {_fmt_money(float(row.get('deuda') or 0.0))}"
                 )
                 for row in contratos
             ]
@@ -1598,7 +1646,7 @@ def _emitir_estado_cuenta_pdf(data):
             )
             filas_pagos.append(
                 (
-                    f"{fecha_txt} | $ {float(row.get('monto') or 0.0):.2f} | "
+                    f"{fecha_txt} | {_fmt_money(float(row.get('monto') or 0.0))} | "
                     f"{row.get('metodo') or '-'} | "
                     f"Contrato {row.get('id_contrato') or '-'} | "
                     f"Espacio {row.get('espacio') or '-'}"
@@ -1608,14 +1656,14 @@ def _emitir_estado_cuenta_pdf(data):
 
     lineas = [
         ("Cliente", cliente),
-        ("DNI", data.get("dni") or "-"),
+        ("DNI", _formatear_documento(data.get("dni")) or "-"),
         ("Contratos activos", str(int(data.get("contratos_activos") or 0))),
-        ("Mensual comprometido", f"$ {float(data.get('mensual') or 0.0):.2f}"),
-        ("Pagado este mes", f"$ {float(data.get('pagado_mes') or 0.0):.2f}"),
-        ("Saldo del mes", f"$ {float(data.get('saldo_mes') or 0.0):.2f}"),
-        ("Deuda estimada", f"$ {float(data.get('deuda') or 0.0):.2f}"),
+        ("Mensual comprometido", _fmt_money(float(data.get("mensual") or 0.0))),
+        ("Pagado este mes", _fmt_money(float(data.get("pagado_mes") or 0.0))),
+        ("Saldo del mes", _fmt_money(float(data.get("saldo_mes") or 0.0))),
+        ("Deuda estimada", _fmt_money(float(data.get("deuda") or 0.0))),
         ("Proximo vencimiento", data.get("proximo_vencimiento") or "Sin contratos activos"),
-        ("Pagado historico", f"$ {float(data.get('pagado_total') or 0.0):.2f}"),
+        ("Pagado historico", _fmt_money(float(data.get("pagado_total") or 0.0))),
         ("Detalle contratos", contratos_txt),
         ("Ultimos pagos", pagos_txt),
     ]
@@ -1724,9 +1772,9 @@ def _emitir_comprobante_estacionamiento(
         ("Espacio", espacio or ""),
         ("Ingreso", dt_ingreso.strftime("%d/%m/%Y %H:%M:%S") if dt_ingreso else ""),
         ("Salida", dt_salida.strftime("%d/%m/%Y %H:%M:%S") if dt_salida else ""),
-        ("Tarifa por hora", f"$ {float(tarifa_hora or 0.0):.2f}"),
+        ("Tarifa por hora", _fmt_money(float(tarifa_hora or 0.0))),
         ("Horas cobradas", horas_cobradas),
-        ("Monto", f"$ {float(total or 0.0):.2f}"),
+        ("Monto", _fmt_money(float(total or 0.0))),
         ("Metodo", metodo or ""),
         ("Fecha emision", datetime.now().strftime("%d/%m/%Y %H:%M")),
     ]
@@ -1771,11 +1819,11 @@ def _emitir_ticket_estacionamiento(
     if dt_salida:
         lineas.append(("Salida", dt_salida.strftime("%d/%m/%Y %H:%M:%S")))
     if tarifa_hora is not None:
-        lineas.append(("Tarifa por hora", f"$ {float(tarifa_hora or 0.0):.2f}"))
+        lineas.append(("Tarifa por hora", _fmt_money(float(tarifa_hora or 0.0))))
     if horas_cobradas is not None:
         lineas.append(("Horas cobradas", horas_cobradas))
     if total is not None:
-        lineas.append(("Total", f"$ {float(total or 0.0):.2f}"))
+        lineas.append(("Total", _fmt_money(float(total or 0.0))))
     if metodo:
         lineas.append(("Metodo", metodo))
     if direccion_local:
@@ -2436,7 +2484,7 @@ class HistorialPagosContratoDialog(QDialog):
             )
             self.table.setItem(r, 0, QTableWidgetItem(fecha_txt))
             self.table.setItem(
-                r, 1, QTableWidgetItem(f"$ {float(row.get('monto') or 0.0):.2f}")
+                r, 1, QTableWidgetItem(_fmt_money(float(row.get("monto") or 0.0)))
             )
             self.table.setItem(r, 2, QTableWidgetItem(row.get("metodo") or ""))
             self.table.setItem(r, 3, QTableWidgetItem(row.get("usuario") or ""))
@@ -2448,7 +2496,7 @@ class HistorialPagosContratoDialog(QDialog):
                 f"Cliente: {detalle.get('nombre') or '-'} | "
                 f"Patente: {detalle.get('patente') or '-'} | "
                 f"Espacio: {detalle.get('codigo') or '-'} | "
-                f"Pagos: {len(pagos)} | Total: $ {total:.2f}"
+                f"Pagos: {len(pagos)} | Total: {_fmt_money(total)}"
             )
         )
 
@@ -2599,11 +2647,12 @@ class CalcularVueltoDialog(QDialog):
         layout.addWidget(info)
 
         form = QFormLayout()
-        self.label_total = QLabel(f"$ {self._total:.2f}")
+        self.label_total = QLabel(_fmt_money(self._total))
         self.input_efectivo = QDoubleSpinBox()
         self.input_efectivo.setDecimals(2)
         self.input_efectivo.setRange(0.0, 999999999.0)
         self.input_efectivo.setSingleStep(100.0)
+        _configurar_spinbox_numerico(self.input_efectivo)
         self.label_resultado = QLabel("Ingresa el efectivo recibido.")
         self.label_resultado.setWordWrap(True)
         form.addRow("Total a cobrar", self.label_total)
@@ -2638,12 +2687,14 @@ class CalcularVueltoDialog(QDialog):
         diferencia = round(recibido - self._total, 2)
         if diferencia < 0:
             self.label_resultado.setText(
-                f"Faltan $ {abs(diferencia):.2f} para completar el pago."
+                f"Faltan $ {_fmt_numero_local(abs(diferencia))} para completar el pago."
             )
         elif diferencia == 0:
             self.label_resultado.setText("Pago exacto. No hay que dar vuelto.")
         else:
-            self.label_resultado.setText(f"Debes dar $ {diferencia:.2f} de vuelto.")
+            self.label_resultado.setText(
+                f"Debes dar $ {_fmt_numero_local(diferencia)} de vuelto."
+            )
 
 
 class ActivosEstacionamientoDialog(QDialog):
@@ -2939,6 +2990,13 @@ class ContratosDialog(QDialog):
 
         form = QFormLayout()
         self.input_dni = QLineEdit()
+        self.input_dni.setMaxLength(10)
+        self.input_dni.setValidator(
+            QRegularExpressionValidator(
+                QRegularExpression(r"[0-9.]{0,10}"),
+                self.input_dni,
+            )
+        )
         self.input_patente = QLineEdit()
         self.input_patente.setReadOnly(True)
         self.input_patente.setPlaceholderText("Patente del cliente/contrato")
@@ -2956,6 +3014,7 @@ class ContratosDialog(QDialog):
         self.input_monto.setDecimals(2)
         self.input_monto.setRange(0.0, 999999.0)
         self.input_monto.setSingleStep(100.0)
+        _configurar_spinbox_numerico(self.input_monto)
         form.addRow("DNI cliente", self.input_dni)
         form.addRow("Patente", self.input_patente)
         form.addRow("Modelo", self.input_modelo)
@@ -3069,7 +3128,7 @@ class ContratosDialog(QDialog):
 
     def _snapshot_form(self):
         return {
-            "dni": self.input_dni.text().strip(),
+            "dni": _solo_digitos(self.input_dni.text().strip()),
             "patente": self.input_patente.text().strip().upper(),
             "modelo": self.input_modelo.text().strip(),
             "tipo_vehiculo": self.input_tipo_vehiculo.text().strip(),
@@ -3135,8 +3194,13 @@ class ContratosDialog(QDialog):
         if self.input_dni.text().strip():
             self._actualizar_patente_por_dni()
 
+    def _formatear_input_dni(self):
+        dni = _solo_digitos(self.input_dni.text().strip())
+        self.input_dni.setText(_formatear_documento(dni))
+        return dni
+
     def _actualizar_patente_por_dni(self):
-        dni = self.input_dni.text().strip()
+        dni = self._formatear_input_dni()
         self.input_patente.clear()
         self.input_modelo.clear()
         self.input_tipo_vehiculo.clear()
@@ -3163,6 +3227,7 @@ class ContratosDialog(QDialog):
         campos = [
             row.get("nombre"),
             row.get("dni"),
+            _formatear_documento(row.get("dni")),
             row.get("patente"),
             row.get("modelo"),
             _texto_tipo_vehiculo(row.get("tipo_vehiculo")),
@@ -3197,7 +3262,7 @@ class ContratosDialog(QDialog):
             item_cliente.setData(Qt.UserRole + 4, int(row.get("en_historial", 0) or 0))
             self.table.setItem(r, 0, item_cliente)
             visible_ids.add(row["id_contrato"])
-            self.table.setItem(r, 1, QTableWidgetItem(row["dni"]))
+            self.table.setItem(r, 1, QTableWidgetItem(_formatear_documento(row["dni"])))
             self.table.setItem(r, 2, QTableWidgetItem(row["patente"] or ""))
             self.table.setItem(r, 3, QTableWidgetItem((row.get("modelo") or "").strip()))
             self.table.setItem(r, 4, QTableWidgetItem(row["codigo"]))
@@ -3205,7 +3270,7 @@ class ContratosDialog(QDialog):
             item_venc = QTableWidgetItem(row["fecha_vencimiento"] or "")
             self.table.setItem(r, 6, item_venc)
             self.table.setItem(
-                r, 7, QTableWidgetItem(f"$ {float(row['monto_mensual'] or 0):.2f}")
+                r, 7, QTableWidgetItem(_fmt_money(row["monto_mensual"] or 0))
             )
             activo = vista["estado"]
             self.table.setItem(r, 8, QTableWidgetItem(activo))
@@ -3515,7 +3580,7 @@ class ContratosDialog(QDialog):
             "modelo": modelo,
             "patente": _formatear_patente(row.get("patente") or ""),
             "vencimiento": vencimiento,
-            "deuda": f"$ {cuota_actual:.2f}",
+            "deuda": _fmt_money(cuota_actual),
             "activo": int(row.get("activo") or 0),
             "dias_para_vencimiento": dias_para_vencimiento,
         }
@@ -3699,7 +3764,7 @@ class ContratosDialog(QDialog):
             return
 
         nombre = (pago.get("nombre") or "").strip() or "cliente"
-        monto = f"$ {float(pago.get('monto') or 0.0):.2f}"
+        monto = _fmt_money(float(pago.get("monto") or 0.0))
         numero = _telefono_a_whatsapp(pago.get("telefono"))
         fecha_pago = _parse_datetime_local(pago.get("fecha_pago"))
         fecha_txt = (
@@ -3778,8 +3843,8 @@ class ContratosDialog(QDialog):
                 self._limpiar_form_contrato()
                 return
             return
-        self.input_dni.setText(row["dni"] or "")
-        self.input_patente.setText(row["patente"] or "")
+        self.input_dni.setText(_formatear_documento(row["dni"] or ""))
+        self.input_patente.setText(_formatear_patente(row["patente"] or ""))
         self.input_modelo.setText((row.get("modelo") or "").strip())
         self.input_tipo_vehiculo.setText(_texto_tipo_vehiculo(row.get("tipo_vehiculo")))
         self.input_espacio.setText((row["codigo"] or "").upper())
@@ -3794,7 +3859,7 @@ class ContratosDialog(QDialog):
         self._actualizar_snapshot_form()
 
     def _crear_contrato(self):
-        dni = self.input_dni.text().strip()
+        dni = self._formatear_input_dni()
         codigo = self.input_espacio.text().strip().upper()
         fecha_venc = self.input_venc.date().toString("yyyy-MM-dd")
         monto = float(self.input_monto.value())
@@ -3992,12 +4057,12 @@ class ContratosDialog(QDialog):
                 "Contrato creado (inactivo)",
                 " - ".join(
                     [
-                        f"DNI {dni}",
+                        f"DNI {_formatear_documento(dni)}",
                         f"Patente {patente}",
                         f"Tipo {_texto_tipo_vehiculo(tipo_vehiculo)}",
                         f"Espacio {codigo}",
                         f"Venc {fecha_venc}",
-                        f"$ {monto:.2f}",
+                        _fmt_money(monto),
                     ]
                 ),
             )
@@ -4593,14 +4658,14 @@ class HistorialContratosDialog(QDialog):
             item_cliente = QTableWidgetItem(row["nombre"])
             item_cliente.setData(Qt.UserRole, row["id_contrato"])
             self.table.setItem(r, 0, item_cliente)
-            self.table.setItem(r, 1, QTableWidgetItem(row["dni"]))
-            self.table.setItem(r, 2, QTableWidgetItem(row["patente"] or ""))
+            self.table.setItem(r, 1, QTableWidgetItem(_formatear_documento(row["dni"])))
+            self.table.setItem(r, 2, QTableWidgetItem(_formatear_patente(row["patente"] or "")))
             self.table.setItem(r, 3, QTableWidgetItem((row.get("modelo") or "").strip()))
             self.table.setItem(r, 4, QTableWidgetItem(row["codigo"]))
             self.table.setItem(r, 5, QTableWidgetItem(row["fecha_inicio"] or ""))
             self.table.setItem(r, 6, QTableWidgetItem(row["fecha_vencimiento"] or ""))
             self.table.setItem(
-                r, 7, QTableWidgetItem(f"$ {float(row['monto_mensual'] or 0):.2f}")
+                r, 7, QTableWidgetItem(_fmt_money(float(row["monto_mensual"] or 0)))
             )
             item_estado = QTableWidgetItem(vista["estado"])
             self.table.setItem(r, 8, item_estado)
@@ -4750,6 +4815,7 @@ class PagoActivacionDialog(QDialog):
         self.input_monto.setDecimals(2)
         self.input_monto.setRange(0.0, 999999.0)
         self.input_monto.setValue(self._monto_base)
+        _configurar_spinbox_numerico(self.input_monto)
         self.combo_metodo = QComboBox()
         self.combo_metodo.addItems(["Efectivo", "Transferencia", "Tarjeta", "Otro"])
         form.addRow("Info", self.label_info)
@@ -4794,11 +4860,12 @@ class PagoCocheraDialog(QDialog):
         self.input_meses = QSpinBox()
         self.input_meses.setRange(1, 24)
         self.input_meses.setValue(1)
-        self.label_sugerido = QLabel(f"$ {self._monto_base:.2f}")
+        self.label_sugerido = QLabel(_fmt_money(self._monto_base))
         self.input_monto = QDoubleSpinBox()
         self.input_monto.setDecimals(2)
         self.input_monto.setRange(0.0, 999999.0)
         self.input_monto.setValue(self._monto_base)
+        _configurar_spinbox_numerico(self.input_monto)
         self.combo_metodo = QComboBox()
         self.combo_metodo.addItems(["Efectivo", "Transferencia", "Tarjeta", "Otro"])
 
@@ -4832,7 +4899,7 @@ class PagoCocheraDialog(QDialog):
     def _actualizar_sugerido(self):
         meses = self.input_meses.value()
         sugerido = self._monto_base * meses
-        self.label_sugerido.setText(f"$ {sugerido:.2f}")
+        self.label_sugerido.setText(_fmt_money(sugerido))
         if not self._monto_fijado:
             self._actualizando = True
             self.input_monto.setValue(sugerido)
@@ -4897,10 +4964,11 @@ class ClientesDialog(QDialog):
         panel_form = QVBoxLayout()
         form = QFormLayout()
         self.input_dni = QLineEdit()
-        self.input_dni.setMaxLength(8)
+        self.input_dni.setMaxLength(10)
         self.input_dni.setValidator(
-            QRegularExpressionValidator(QRegularExpression(r"[0-9]{0,8}"), self.input_dni)
+            QRegularExpressionValidator(QRegularExpression(r"[0-9.]{0,10}"), self.input_dni)
         )
+        self.input_dni.editingFinished.connect(self._formatear_input_dni)
         self.input_nombre = QLineEdit()
         self.input_direccion = QLineEdit()
         self.input_telefono = QLineEdit()
@@ -5384,7 +5452,7 @@ class ClientesDialog(QDialog):
             row = cur.fetchone()
             if not row:
                 return
-            self.input_dni.setText(_solo_digitos(row["dni"] or ""))
+            self.input_dni.setText(_formatear_documento(row["dni"] or ""))
             self.input_nombre.setText(row["nombre"])
             self.input_direccion.setText(row["direccion"] or "")
             self.input_telefono.setText(row["telefono"] or "")
@@ -5410,14 +5478,16 @@ class ClientesDialog(QDialog):
             conn = get_connection()
             cur = conn.cursor()
             if texto:
-                like = f"%{texto}%"
+                like_nombre = f"%{texto}%"
+                texto_dni = _solo_digitos(texto)
+                like_dni = f"%{texto_dni or texto}%"
                 cur.execute(
                     "SELECT c.id_cliente, c.nombre, c.dni, c.telefono, c.activo, "
                     "(SELECT COUNT(*) FROM cochera_contratos cc "
                     " WHERE cc.id_cliente = c.id_cliente AND cc.activo = 1) AS contratos_activos "
                     "FROM clientes c WHERE c.nombre LIKE ? OR c.dni LIKE ? "
                     "ORDER BY c.nombre",
-                    (like, like),
+                    (like_nombre, like_dni),
                 )
             else:
                 cur.execute(
@@ -5434,7 +5504,7 @@ class ClientesDialog(QDialog):
                 item_nombre.setData(Qt.UserRole + 1, int(row["activo"] or 0))
                 item_nombre.setData(Qt.UserRole + 2, int(row["contratos_activos"] or 0))
                 self.table.setItem(r, 0, item_nombre)
-                self.table.setItem(r, 1, QTableWidgetItem(row["dni"]))
+                self.table.setItem(r, 1, QTableWidgetItem(_formatear_documento(row["dni"])))
                 self.table.setItem(r, 2, QTableWidgetItem(row["telefono"] or ""))
                 activo = "SI" if row["activo"] == 1 else "NO"
                 self.table.setItem(r, 3, QTableWidgetItem(activo))
@@ -5461,7 +5531,7 @@ class ClientesDialog(QDialog):
 
     def _snapshot_form(self):
         return {
-            "dni": self.input_dni.text().strip(),
+            "dni": _solo_digitos(self.input_dni.text().strip()),
             "nombre": self.input_nombre.text().strip(),
             "direccion": self.input_direccion.text().strip(),
             "telefono": self.input_telefono.text().strip(),
@@ -5507,9 +5577,13 @@ class ClientesDialog(QDialog):
         self._actualizar_snapshot_form()
         self._actualizar_estado_interaccion_cliente()
 
-    def _guardar_cliente(self):
+    def _formatear_input_dni(self):
         dni = _solo_digitos(self.input_dni.text().strip())
-        self.input_dni.setText(dni)
+        self.input_dni.setText(_formatear_documento(dni))
+        return dni
+
+    def _guardar_cliente(self):
+        dni = self._formatear_input_dni()
         nombre = self.input_nombre.text().strip()
         direccion = self.input_direccion.text().strip()
         telefono = self.input_telefono.text().strip()
@@ -5546,7 +5620,7 @@ class ClientesDialog(QDialog):
                 )
                 accion = "Cliente creado"
             conn.commit()
-            _auditar(self, accion, f"{nombre} - DNI {dni}")
+            _auditar(self, accion, f"{nombre} - DNI {_formatear_documento(dni)}")
             self._cargar()
             self._limpiar_form()
             return True
@@ -5998,7 +6072,7 @@ class ClientesDialog(QDialog):
             else:
                 data["vencimiento"] = f"{base} (en {dias} dia/s)"
 
-        data["deuda"] = f"$ {deuda_total:.2f}"
+        data["deuda"] = _fmt_money(deuda_total)
         return data
 
     def _enviar_whatsapp_cliente(self):
@@ -6119,7 +6193,7 @@ class EstadoCuentaDialog(QDialog):
 
     @staticmethod
     def _fmt_money(value):
-        return f"$ {float(value or 0.0):.2f}"
+        return _fmt_money(value)
 
     @staticmethod
     def _meses_mora(fecha_venc, hoy):
@@ -6282,7 +6356,7 @@ class EstadoCuentaDialog(QDialog):
             return
 
         self.label_cliente.setText(f"Cliente: {data['cliente']}")
-        self.label_dni.setText(data["dni"])
+        self.label_dni.setText(_formatear_documento(data["dni"]))
         self.label_contratos.setText(str(data["contratos_activos"]))
         self.label_mensual.setText(self._fmt_money(data["mensual"]))
         self.label_pagado_mes.setText(self._fmt_money(data["pagado_mes"]))
@@ -6373,30 +6447,35 @@ class TarifaDialog(QDialog):
         self.input_precio_hora_auto.setDecimals(2)
         self.input_precio_hora_auto.setRange(0.0, 999999.0)
         self.input_precio_hora_auto.setSingleStep(10.0)
+        _configurar_spinbox_numerico(self.input_precio_hora_auto)
 
         self.label_nuevo_hora_moto = QLabel("Nuevo precio por hora (Moto)")
         self.input_precio_hora_moto = QDoubleSpinBox()
         self.input_precio_hora_moto.setDecimals(2)
         self.input_precio_hora_moto.setRange(0.0, 999999.0)
         self.input_precio_hora_moto.setSingleStep(10.0)
+        _configurar_spinbox_numerico(self.input_precio_hora_moto)
 
         self.label_nuevo_hora_camioneta = QLabel("Nuevo precio por hora (Camioneta)")
         self.input_precio_hora_camioneta = QDoubleSpinBox()
         self.input_precio_hora_camioneta.setDecimals(2)
         self.input_precio_hora_camioneta.setRange(0.0, 999999.0)
         self.input_precio_hora_camioneta.setSingleStep(10.0)
+        _configurar_spinbox_numerico(self.input_precio_hora_camioneta)
 
         self.label_nuevo_mensual_auto = QLabel("Nuevo precio mensual cochera (Auto)")
         self.input_precio_mensual_auto = QDoubleSpinBox()
         self.input_precio_mensual_auto.setDecimals(2)
         self.input_precio_mensual_auto.setRange(0.0, 999999.0)
         self.input_precio_mensual_auto.setSingleStep(100.0)
+        _configurar_spinbox_numerico(self.input_precio_mensual_auto)
 
         self.label_nuevo_mensual_camioneta = QLabel("Nuevo precio mensual cochera (Camioneta)")
         self.input_precio_mensual_camioneta = QDoubleSpinBox()
         self.input_precio_mensual_camioneta.setDecimals(2)
         self.input_precio_mensual_camioneta.setRange(0.0, 999999.0)
         self.input_precio_mensual_camioneta.setSingleStep(100.0)
+        _configurar_spinbox_numerico(self.input_precio_mensual_camioneta)
 
         def agregar_bloque(label_actual, label_nuevo, input_widget):
             layout.addWidget(label_actual)
@@ -6491,16 +6570,20 @@ class TarifaDialog(QDialog):
                 valor_mensual_camioneta = float(
                     row["precio_mensual_camioneta"] or row["precio_mensual"] or 0
                 )
-                self.label_actual_hora_auto.setText(f"Hora auto actual: $ {valor_hora_auto:.2f}")
-                self.label_actual_hora_moto.setText(f"Hora moto actual: $ {valor_hora_moto:.2f}")
+                self.label_actual_hora_auto.setText(
+                    f"Hora auto actual: {_fmt_money(valor_hora_auto)}"
+                )
+                self.label_actual_hora_moto.setText(
+                    f"Hora moto actual: {_fmt_money(valor_hora_moto)}"
+                )
                 self.label_actual_hora_camioneta.setText(
-                    f"Hora camioneta actual: $ {valor_hora_camioneta:.2f}"
+                    f"Hora camioneta actual: {_fmt_money(valor_hora_camioneta)}"
                 )
                 self.label_actual_mensual_auto.setText(
-                    f"Mensual auto actual: $ {valor_mensual_auto:.2f}"
+                    f"Mensual auto actual: {_fmt_money(valor_mensual_auto)}"
                 )
                 self.label_actual_mensual_camioneta.setText(
-                    f"Mensual camioneta actual: $ {valor_mensual_camioneta:.2f}"
+                    f"Mensual camioneta actual: {_fmt_money(valor_mensual_camioneta)}"
                 )
                 self.input_precio_hora_auto.setValue(valor_hora_auto)
                 self.input_precio_hora_moto.setValue(valor_hora_moto)
@@ -7588,7 +7671,7 @@ class MapaCocheraDialog(QDialog):
                         f"Tipo: {tipo_txt}\n"
                         f"Ingreso: {ingreso_txt}\n"
                         f"Salida: {salida_txt}\n"
-                        f"Precio: $ {total:.2f}"
+                        f"Precio: {_fmt_money(total)}"
                     )
                 detalle_txt = "\n\n".join(bloques)
                 QMessageBox.information(
@@ -8130,7 +8213,7 @@ class VencimientosDialog(QDialog):
             "telefono": (row.get("telefono") or "").strip(),
             "modelo": modelo,
             "vencimiento": vencimiento,
-            "deuda": f"$ {cuota_actual:.2f}",
+            "deuda": _fmt_money(cuota_actual),
             "codigo": (row.get("codigo") or "").strip() or "-",
             "patente": _formatear_patente(row.get("patente") or ""),
             "id_contrato": row.get("id_contrato"),
@@ -8635,9 +8718,9 @@ class ReportesDialog(QDialog):
         cochera = self._sum_monto(detalle, "Cochera")
         estacionamiento = self._sum_monto(detalle, "Estacionamiento")
         total = cochera + estacionamiento
-        self.label_cochera_value.setText(f"$ {cochera:.2f}")
-        self.label_est_value.setText(f"$ {estacionamiento:.2f}")
-        self.label_total_value.setText(f"$ {total:.2f}")
+        self.label_cochera_value.setText(_fmt_money(cochera))
+        self.label_est_value.setText(_fmt_money(estacionamiento))
+        self.label_total_value.setText(_fmt_money(total))
 
     def _detalle_filtrado(self):
         detalle = list(self._detalle_cache or [])
@@ -8675,7 +8758,7 @@ class ReportesDialog(QDialog):
             self.table_historial.setItem(r, 0, item_tipo)
             self.table_historial.setItem(r, 1, QTableWidgetItem(row["fecha_pago"]))
             self.table_historial.setItem(
-                r, 2, QTableWidgetItem(f"$ {row['monto']:.2f}")
+                r, 2, QTableWidgetItem(_fmt_money(row["monto"]))
             )
             self.table_historial.setItem(r, 3, QTableWidgetItem(row["metodo"]))
             self.table_historial.setItem(r, 4, QTableWidgetItem(row["cliente"]))
@@ -8743,7 +8826,7 @@ class ReportesDialog(QDialog):
             f"Patente: {patente}\n"
             f"Espacio: {espacio}\n"
             f"Fecha: {fecha}\n"
-            f"Monto: $ {monto:.2f}",
+            f"Monto: {_fmt_money(monto)}",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -9165,6 +9248,7 @@ class CajaDiariaDialog(QDialog):
         self.input_total_contado.setSingleStep(100.0)
         self.input_total_contado.setReadOnly(True)
         self.input_total_contado.setEnabled(False)
+        _configurar_spinbox_numerico(self.input_total_contado)
         self.label_diferencia = QLabel("$ 0.00")
         self.input_observacion = QLineEdit()
         self.input_observacion.setPlaceholderText(
@@ -9230,9 +9314,9 @@ class CajaDiariaDialog(QDialog):
         cierre = svc_obtener_cierre_caja(fecha_key)
         cierre_metodos = svc_obtener_cierre_caja_metodos(fecha_key)
 
-        self.label_cochera.setText(f"$ {cochera:.2f}")
-        self.label_est.setText(f"$ {est:.2f}")
-        self.label_total.setText(f"$ {total:.2f}")
+        self.label_cochera.setText(_fmt_money(cochera))
+        self.label_est.setText(_fmt_money(est))
+        self.label_total.setText(_fmt_money(total))
         self._total_esperado_actual = float(total or 0.0)
 
         self.table_metodos.setRowCount(0)
@@ -9324,10 +9408,10 @@ class CajaDiariaDialog(QDialog):
 
     def _texto_diferencia(self, diferencia):
         if diferencia > 0.009:
-            return f"$ +{diferencia:.2f} (sobrante)"
+            return f"$ +{_fmt_numero_local(diferencia)} (sobrante)"
         if diferencia < -0.009:
-            return f"$ {diferencia:.2f} (faltante)"
-        return "$ 0.00 (cuadra)"
+            return f"$ -{_fmt_numero_local(abs(diferencia))} (faltante)"
+        return f"{_fmt_money(0)} (cuadra)"
 
     def _hay_diferencia(self, diferencia):
         return abs(float(diferencia or 0.0)) > 0.009
@@ -9344,21 +9428,20 @@ class CajaDiariaDialog(QDialog):
         r = self.table_metodos.rowCount()
         self.table_metodos.insertRow(r)
         self.table_metodos.setItem(r, 0, QTableWidgetItem(str(metodo)))
-        self.table_metodos.setItem(r, 1, QTableWidgetItem(f"$ {float(cochera or 0.0):.2f}"))
-        self.table_metodos.setItem(
-            r, 2, QTableWidgetItem(f"$ {float(estacionamiento or 0.0):.2f}")
-        )
-        self.table_metodos.setItem(r, 3, QTableWidgetItem(f"$ {float(esperado or 0.0):.2f}"))
+        self.table_metodos.setItem(r, 1, QTableWidgetItem(_fmt_money(cochera)))
+        self.table_metodos.setItem(r, 2, QTableWidgetItem(_fmt_money(estacionamiento)))
+        self.table_metodos.setItem(r, 3, QTableWidgetItem(_fmt_money(esperado)))
 
         input_contado = QDoubleSpinBox()
         input_contado.setDecimals(2)
         input_contado.setRange(0.0, 999999999.0)
         input_contado.setSingleStep(100.0)
         input_contado.setValue(float(contado or 0.0))
+        _configurar_spinbox_numerico(input_contado)
         input_contado.valueChanged.connect(self._actualizar_diferencia)
         self.table_metodos.setCellWidget(r, 4, input_contado)
 
-        item_dif = QTableWidgetItem("$ 0.00")
+        item_dif = QTableWidgetItem(_fmt_money(0))
         self.table_metodos.setItem(r, 5, item_dif)
         self.table_metodos.setItem(r, 6, QTableWidgetItem(str(int(operaciones or 0))))
         self._metodo_rows.append(
@@ -9411,7 +9494,7 @@ class CajaDiariaDialog(QDialog):
         contado = self._total_contado_metodos()
         self.input_total_contado.setValue(contado)
         diferencia = contado - float(self._total_esperado_actual or 0.0)
-        self.label_total_real.setText(f"$ {contado:.2f}")
+        self.label_total_real.setText(_fmt_money(contado))
         self.label_diferencia.setText(self._texto_diferencia(diferencia))
         tema_claro = _tema_claro_activo()
         if diferencia > 0.009:
@@ -9455,9 +9538,9 @@ class CajaDiariaDialog(QDialog):
         try:
             fecha_key = self.input_fecha.date().toString("yyyy-MM-dd")
             cochera, est, total = svc_consultar_totales_caja(fecha_key)
-            self.label_cochera.setText(f"$ {cochera:.2f}")
-            self.label_est.setText(f"$ {est:.2f}")
-            self.label_total.setText(f"$ {total:.2f}")
+            self.label_cochera.setText(_fmt_money(cochera))
+            self.label_est.setText(_fmt_money(est))
+            self.label_total.setText(_fmt_money(total))
             self._total_esperado_actual = float(total or 0.0)
 
             total_contado = float(self._total_contado_metodos())
@@ -12123,16 +12206,16 @@ class VentanaPrincipal(QMainWindow):
         self.ui.label_total_value.setText(str(total))
         self.ui.label_ocupadas_value.setText(str(ocupadas))
         self.ui.label_libres_value.setText(str(libres))
-        self.ui.label_ingresos_value.setText(f"$ {ingresos:.2f}")
+        self.ui.label_ingresos_value.setText(_fmt_money(ingresos))
         if tarifa_hora is None:
             self.ui.label_est_tarifa_value.setText("$ 0.00")
         else:
-            self.ui.label_est_tarifa_value.setText(f"$ {tarifa_hora:.2f}")
+            self.ui.label_est_tarifa_value.setText(_fmt_money(tarifa_hora))
 
         if tarifa_mensual is None:
             self.ui.label_mensual_value.setText("$ 0.00")
         else:
-            self.ui.label_mensual_value.setText(f"$ {tarifa_mensual:.2f}")
+            self.ui.label_mensual_value.setText(_fmt_money(tarifa_mensual))
 
         if hasattr(self.ui, "label_est_total_value"):
             self.ui.label_est_total_value.setText(str(est_total))
@@ -12144,7 +12227,7 @@ class VentanaPrincipal(QMainWindow):
             if tarifa_hora is None:
                 self.ui.label_est_tarifa_resumen_value.setText("$ 0.00")
             else:
-                self.ui.label_est_tarifa_resumen_value.setText(f"$ {tarifa_hora:.2f}")
+                self.ui.label_est_tarifa_resumen_value.setText(_fmt_money(tarifa_hora))
 
         self._actualizar_estado_menu_estacionamiento()
 
@@ -12765,7 +12848,7 @@ class VentanaPrincipal(QMainWindow):
                 f"Salida: {salida_txt}\n"
                 f"Horas cobradas: {horas_cobradas}\n"
                 f"Metodo: {metodo}\n"
-                f"Precio: $ {total:.2f}"
+                f"Precio: {_fmt_money(total)}"
             )
             btn_abrir = None
             btn_vuelto = None
