@@ -127,6 +127,16 @@ def reparar_integridad_db(conn=None):
                 ")",
             ),
             (
+                "movimientos_tarifa_invalida",
+                "UPDATE movimientos "
+                "SET id_tarifa_aplicada = NULL "
+                "WHERE id_tarifa_aplicada IS NOT NULL "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM tarifas t "
+                "WHERE t.id_tarifa = movimientos.id_tarifa_aplicada"
+                ")",
+            ),
+            (
                 "pagos_contratos_invalidos",
                 "DELETE FROM pagos_cochera "
                 "WHERE id_contrato IN ("
@@ -284,10 +294,13 @@ def init_db():
         id_espacio INTEGER NOT NULL,
         fecha_ingreso DATETIME DEFAULT CURRENT_TIMESTAMP,
         tipo_vehiculo TEXT DEFAULT 'AUTO',
+        id_tarifa_aplicada INTEGER,
+        tarifa_hora_aplicada REAL,
         fecha_salida DATETIME,
         total REAL,
         FOREIGN KEY (id_vehiculo) REFERENCES vehiculos(id_vehiculo),
-        FOREIGN KEY (id_espacio) REFERENCES espacios(id_espacio)
+        FOREIGN KEY (id_espacio) REFERENCES espacios(id_espacio),
+        FOREIGN KEY (id_tarifa_aplicada) REFERENCES tarifas(id_tarifa)
     );
 
     CREATE TABLE IF NOT EXISTS pagos (
@@ -599,9 +612,62 @@ def init_db():
         pass
     try:
         cursor.execute(
+            "ALTER TABLE movimientos "
+            "ADD COLUMN id_tarifa_aplicada INTEGER REFERENCES tarifas(id_tarifa)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("ALTER TABLE movimientos ADD COLUMN tarifa_hora_aplicada REAL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
             "UPDATE movimientos "
             "SET tipo_vehiculo = COALESCE(NULLIF(TRIM(tipo_vehiculo), ''), 'AUTO')"
         )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_movimientos_tarifa "
+            "ON movimientos (id_tarifa_aplicada)"
+        )
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute(
+            "SELECT id_tarifa, precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
+            "FROM tarifas WHERE activa = 1 ORDER BY fecha_desde DESC LIMIT 1"
+        )
+        tarifa_activa = cursor.fetchone()
+        if tarifa_activa:
+            tarifa_id = int(tarifa_activa["id_tarifa"])
+            cursor.execute(
+                "UPDATE movimientos "
+                "SET id_tarifa_aplicada = COALESCE(id_tarifa_aplicada, ?), "
+                "tarifa_hora_aplicada = COALESCE("
+                "tarifa_hora_aplicada, "
+                "CASE "
+                "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, 'AUTO'))) = 'MOTO' "
+                "THEN COALESCE(?, ?, 0) "
+                "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, 'AUTO'))) = 'CAMIONETA' "
+                "THEN COALESCE(?, ?, 0) "
+                "ELSE COALESCE(?, ?, 0) "
+                "END"
+                ") "
+                "WHERE fecha_salida IS NULL "
+                "AND (id_tarifa_aplicada IS NULL OR tarifa_hora_aplicada IS NULL)",
+                (
+                    tarifa_id,
+                    tarifa_activa["precio_hora_moto"],
+                    tarifa_activa["precio_hora"],
+                    tarifa_activa["precio_hora_camioneta"],
+                    tarifa_activa["precio_hora"],
+                    tarifa_activa["precio_hora_auto"],
+                    tarifa_activa["precio_hora"],
+                ),
+            )
     except sqlite3.OperationalError:
         pass
     try:

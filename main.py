@@ -595,6 +595,8 @@ def _formatear_patente(texto):
         return f"{patente[:2]} {patente[2:5]} {patente[5:]}"
     if re.fullmatch(r"[A-Z]{3}\d{3}", patente):
         return f"{patente[:3]} {patente[3:]}"
+    if re.fullmatch(r"\d{3}[A-Z]{3}", patente):
+        return f"{patente[:3]} {patente[3:]}"
     return patente
 
 
@@ -605,7 +607,37 @@ def _patente_formato_valido(texto):
     return bool(
         re.fullmatch(r"[A-Z]{2}\d{3}[A-Z]{2}", patente)
         or re.fullmatch(r"[A-Z]{3}\d{3}", patente)
+        or re.fullmatch(r"\d{3}[A-Z]{3}", patente)
     )
+
+
+def _patente_est_formato_valido(texto):
+    patente = _normalizar_patente(texto)
+    if not patente:
+        return False
+    return bool(
+        re.fullmatch(r"[A-Z]{2}\d{3}[A-Z]{2}", patente)
+        or re.fullmatch(r"[A-Z]{3}\d{3}", patente)
+        or re.fullmatch(r"\d{3}[A-Z]{3}", patente)
+    )
+
+
+def _patente_es_moto(texto):
+    patente = _normalizar_patente(texto)
+    if not patente:
+        return False
+    return bool(re.fullmatch(r"\d{3}[A-Z]{3}", patente))
+
+
+def _patente_est_es_moto(texto):
+    return _patente_es_moto(texto)
+
+
+def _formatear_patente_estacionamiento(texto):
+    patente = _normalizar_patente(texto)
+    if re.fullmatch(r"\d{3}[A-Z]{3}", patente):
+        return f"{patente[:3]} {patente[3:]}"
+    return _formatear_patente(texto)
 
 
 def _telefono_a_whatsapp(telefono):
@@ -667,6 +699,20 @@ def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
             patente=patente_txt,
             patente_extra=patente_extra,
         )
+
+
+def _texto_cuota_recordatorio(tipo_vehiculo="AUTO", monto_contrato=0.0):
+    monto_actual = svc_obtener_tarifa_mensual_actual(tipo_vehiculo)
+    if monto_actual is None or float(monto_actual or 0.0) <= 0:
+        monto_actual = float(monto_contrato or 0.0)
+    return _fmt_money(float(monto_actual or 0.0))
+
+
+def _nombre_cliente_valido(texto):
+    valor = " ".join(str(texto or "").strip().split())
+    if not valor:
+        return False
+    return bool(re.fullmatch(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü' -]+", valor))
 
 
 def _icono_whatsapp(size=18):
@@ -1030,6 +1076,27 @@ def _tipos_vehiculo_config_estacionamiento():
     if _config_get_bool("est_perm_camioneta", True):
         tipos.append(("Camioneta", "CAMIONETA"))
     return tipos
+
+
+def _tipos_vehiculo_config_cochera():
+    tipos = []
+    if _config_get_bool("coch_perm_auto", True):
+        tipos.append(("Auto", "AUTO"))
+    if _config_get_bool("coch_perm_moto", True):
+        tipos.append(("Moto", "MOTO"))
+    if _config_get_bool("coch_perm_camioneta", True):
+        tipos.append(("Camioneta", "CAMIONETA"))
+    return tipos
+
+
+def _tipo_vehiculo_habilitado_estacionamiento(tipo):
+    tipo_norm = _normalizar_tipo_vehiculo(tipo)
+    return any(codigo == tipo_norm for _texto, codigo in _tipos_vehiculo_config_estacionamiento())
+
+
+def _tipo_vehiculo_habilitado_cochera(tipo):
+    tipo_norm = _normalizar_tipo_vehiculo(tipo)
+    return any(codigo == tipo_norm for _texto, codigo in _tipos_vehiculo_config_cochera())
 
 
 def _escritorio_base_actual():
@@ -2142,8 +2209,26 @@ class UsuariosDialog(QDialog):
         password = self.input_password.text()
         password2 = self.input_password2.text()
 
-        if not usuario or not password:
-            QMessageBox.warning(self, "Datos incompletos", "Completa todos los campos.")
+        if not usuario:
+            QMessageBox.warning(
+                self,
+                "Datos incompletos",
+                "Completa el nombre de usuario del operador.",
+            )
+            return False
+        if not password:
+            QMessageBox.warning(
+                self,
+                "Datos incompletos",
+                "Completa la contrasena del operador.",
+            )
+            return False
+        if not password2:
+            QMessageBox.warning(
+                self,
+                "Datos incompletos",
+                "Repite la contrasena para confirmar el operador.",
+            )
             return False
         if password != password2:
             QMessageBox.warning(self, "Contrasena", "Las contrasenas no coinciden.")
@@ -2177,6 +2262,11 @@ class UsuariosDialog(QDialog):
     def _cambiar_activo(self, activo):
         item = self.lista.currentItem()
         if not item:
+            QMessageBox.warning(
+                self,
+                "Usuario",
+                "Selecciona un usuario de la lista antes de activarlo o desactivarlo.",
+            )
             return
         rol = item.data(Qt.UserRole + 1)
         if rol == "DUENO":
@@ -2226,6 +2316,13 @@ class UsuariosDialog(QDialog):
         password2 = self.input_new_password2.text()
         if not password:
             QMessageBox.warning(self, "Contrasena", "Completa la nueva contrasena.")
+            return False
+        if not password2:
+            QMessageBox.warning(
+                self,
+                "Contrasena",
+                "Repite la nueva contrasena para confirmarla.",
+            )
             return False
         if password != password2:
             QMessageBox.warning(self, "Contrasena", "Las contrasenas no coinciden.")
@@ -2440,6 +2537,13 @@ class HistorialPagosContratoDialog(QDialog):
         self.btn_cerrar = QPushButton("Cerrar")
         self.btn_actualizar.setProperty("variant", "neutral")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.label_resumen.setToolTip(
+            "Resumen rapido del contrato, la patente y el total pagado."
+        )
+        self.btn_actualizar.setToolTip(
+            "Vuelve a consultar los pagos registrados para este contrato."
+        )
+        self.btn_cerrar.setToolTip("Cierra este historial de pagos.")
         acciones.addStretch(1)
         acciones.addWidget(self.btn_actualizar)
         acciones.addWidget(self.btn_cerrar)
@@ -2489,6 +2593,15 @@ class HistorialPagosContratoDialog(QDialog):
             self.table.setItem(r, 2, QTableWidgetItem(row.get("metodo") or ""))
             self.table.setItem(r, 3, QTableWidgetItem(row.get("usuario") or ""))
             self.table.setItem(r, 4, QTableWidgetItem(row.get("ref_externa") or ""))
+
+        if not pagos:
+            self.table.insertRow(0)
+            item = QTableWidgetItem(
+                "Todavia no hay pagos registrados para este contrato."
+            )
+            item.setFlags(Qt.NoItemFlags)
+            self.table.setSpan(0, 0, 1, self.table.columnCount())
+            self.table.setItem(0, 0, item)
 
         self.label_resumen.setText(
             (
@@ -2571,6 +2684,10 @@ class IngresoRapidoEstDialog(QDialog):
         self.btn_cancelar = QPushButton("Cancelar")
         self.btn_confirmar.setProperty("variant", "success")
         self.btn_cancelar.setProperty("variant", "neutral")
+        self.btn_confirmar.setToolTip(
+            "Registra el ingreso rapido del vehiculo con estos datos."
+        )
+        self.btn_cancelar.setToolTip("Cancela este ingreso rapido y vuelve atras.")
         self.btn_confirmar.setMinimumHeight(48)
         self.btn_cancelar.setMinimumHeight(48)
         botones.addWidget(self.btn_confirmar)
@@ -2665,6 +2782,10 @@ class CalcularVueltoDialog(QDialog):
         self.btn_cerrar = QPushButton("Cerrar")
         self.btn_calcular.setProperty("variant", "success")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_calcular.setToolTip(
+            "Calcula si el pago alcanza y cuanto debes devolver de vuelto."
+        )
+        self.btn_cerrar.setToolTip("Cierra esta ventana de calculo.")
         botones.addWidget(self.btn_calcular)
         botones.addWidget(self.btn_cerrar)
         layout.addLayout(botones)
@@ -2701,6 +2822,7 @@ class ActivosEstacionamientoDialog(QDialog):
     def __init__(self, filas, permitir_salida=False, parent=None):
         super().__init__(parent)
         self._permitir_salida = bool(permitir_salida)
+        self._filas_cache = list(filas or [])
         self.setWindowTitle(
             "Modo sencillo - Salida" if self._permitir_salida else "Modo sencillo - Vehiculos activos"
         )
@@ -2725,6 +2847,7 @@ class ActivosEstacionamientoDialog(QDialog):
         self.btn_cerrar = QPushButton("Cerrar")
         self.btn_principal.setProperty("variant", "warning" if self._permitir_salida else "neutral")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_cerrar.setToolTip("Cierra esta ventana y vuelve al modo sencillo.")
         botones.addWidget(self.btn_principal)
         botones.addStretch(1)
         botones.addWidget(self.btn_cerrar)
@@ -2733,7 +2856,7 @@ class ActivosEstacionamientoDialog(QDialog):
         self.btn_principal.clicked.connect(self._accion_principal)
         self.btn_cerrar.clicked.connect(self.reject)
         self.lista.itemDoubleClicked.connect(self._doble_click)
-        self._cargar(filas or [])
+        self._cargar(self._filas_cache)
 
     def _cargar(self, filas):
         self.lista.clear()
@@ -2757,8 +2880,16 @@ class ActivosEstacionamientoDialog(QDialog):
             vacio.setFlags(Qt.NoItemFlags)
             self.lista.addItem(vacio)
             self.btn_principal.setEnabled(False)
+            self.btn_principal.setToolTip(
+                "No hay vehiculos activos para operar desde esta ventana."
+            )
         else:
             self.btn_principal.setEnabled(True)
+            self.btn_principal.setToolTip(
+                "Selecciona un vehiculo activo y registrale la salida."
+                if self._permitir_salida
+                else "Vuelve a consultar los vehiculos que siguen dentro del estacionamiento."
+            )
 
     def _doble_click(self, item):
         if self._permitir_salida and item and item.data(Qt.UserRole):
@@ -2775,7 +2906,18 @@ class ActivosEstacionamientoDialog(QDialog):
                 return
             self.accept()
             return
-        self.reject()
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "_filas_activas"):
+            try:
+                self._filas_cache = list(parent._filas_activas() or [])
+            except Exception:
+                self._filas_cache = []
+        self._cargar(self._filas_cache)
+        QMessageBox.information(
+            self,
+            "Vehiculos activos",
+            "La lista de vehiculos activos se actualizo.",
+        )
 
     def patente_seleccionada(self):
         item = self.lista.currentItem()
@@ -2825,6 +2967,18 @@ class ModoSencilloEstacionamientoDialog(QDialog):
         self.btn_salida.setProperty("variant", "warning")
         self.btn_activos.setProperty("variant", "info")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_ingreso.setToolTip(
+            "Abre el formulario simple para registrar un ingreso. Atajo: Ctrl+Q."
+        )
+        self.btn_salida.setToolTip(
+            "Muestra los vehiculos activos para elegir uno y registrar la salida. Atajo: Ctrl+W."
+        )
+        self.btn_activos.setToolTip(
+            "Muestra la lista actual de vehiculos que siguen dentro del estacionamiento. Atajo: Ctrl+E."
+        )
+        self.btn_cerrar.setToolTip(
+            "Cierra el modo sencillo y vuelve a la ventana principal."
+        )
         for btn in (self.btn_ingreso, self.btn_salida, self.btn_activos, self.btn_cerrar):
             fuente = btn.font()
             fuente.setPointSize(15)
@@ -2921,7 +3075,16 @@ class ModoSencilloEstacionamientoDialog(QDialog):
         self._refrescar_estado()
 
     def _abrir_salida(self):
-        dlg = ActivosEstacionamientoDialog(self._filas_activas(), permitir_salida=True, parent=self)
+        filas = self._filas_activas()
+        if not filas:
+            QMessageBox.information(
+                self,
+                "Modo sencillo",
+                "No hay vehiculos activos para registrar una salida.",
+            )
+            self._refrescar_estado()
+            return
+        dlg = ActivosEstacionamientoDialog(filas, permitir_salida=True, parent=self)
         if dlg.exec() != QDialog.Accepted:
             self._refrescar_estado()
             return
@@ -2930,14 +3093,23 @@ class ModoSencilloEstacionamientoDialog(QDialog):
             return
         if not self.ventana._abrir_menu_estacionamiento(popup_parent=self):
             return
-        self.ventana.ui.input_patente_est.setText(_formatear_patente(patente))
+        self.ventana.ui.input_patente_est.setText(_formatear_patente_estacionamiento(patente))
         self.ventana._registrar_salida_est(popup_parent=self)
         self.raise_()
         self.activateWindow()
         self._refrescar_estado()
 
     def _ver_activos(self):
-        dlg = ActivosEstacionamientoDialog(self._filas_activas(), permitir_salida=False, parent=self)
+        filas = self._filas_activas()
+        if not filas:
+            QMessageBox.information(
+                self,
+                "Modo sencillo",
+                "No hay vehiculos activos para mostrar en este momento.",
+            )
+            self._refrescar_estado()
+            return
+        dlg = ActivosEstacionamientoDialog(filas, permitir_salida=False, parent=self)
         dlg.exec()
         self._refrescar_estado()
 
@@ -3558,6 +3730,7 @@ class ContratosDialog(QDialog):
         telefono = (row.get("telefono") or "").strip()
         modelo = (row.get("modelo") or "").strip()
         monto = float(row.get("monto_mensual") or 0.0)
+        tipo_vehiculo = row.get("tipo_vehiculo") or "AUTO"
         fecha_venc = QDate.fromString(row.get("fecha_vencimiento") or "", "yyyy-MM-dd")
         hoy = QDate.currentDate()
         vencimiento = "Sin vencimiento"
@@ -3573,14 +3746,13 @@ class ContratosDialog(QDialog):
                 vencimiento = f"{base} (en {dias} dia/s)"
         else:
             dias_para_vencimiento = None
-        cuota_actual = monto if monto > 0 else 0.0
         return {
             "nombre": nombre,
             "telefono": telefono,
             "modelo": modelo,
             "patente": _formatear_patente(row.get("patente") or ""),
             "vencimiento": vencimiento,
-            "deuda": _fmt_money(cuota_actual),
+            "deuda": _texto_cuota_recordatorio(tipo_vehiculo, monto),
             "activo": int(row.get("activo") or 0),
             "dias_para_vencimiento": dias_para_vencimiento,
         }
@@ -3964,6 +4136,16 @@ class ContratosDialog(QDialog):
             self.input_patente.setText(_formatear_patente(patente))
             self.input_modelo.setText(modelo)
             self.input_tipo_vehiculo.setText(_texto_tipo_vehiculo(tipo_vehiculo))
+            if not _tipo_vehiculo_habilitado_cochera(tipo_vehiculo):
+                QMessageBox.warning(
+                    self,
+                    "Tipo no permitido",
+                    (
+                        f"El tipo {_texto_tipo_vehiculo(tipo_vehiculo)} no esta habilitado para cochera.\n"
+                        "Revisalo en Configuracion > Sistema > Tipos en cochera."
+                    ),
+                )
+                return False
             tarifa_sugerida = svc_obtener_tarifa_mensual_actual(tipo_vehiculo)
             if tarifa_sugerida is not None and monto <= 0:
                 monto = float(tarifa_sugerida)
@@ -4681,6 +4863,16 @@ class HistorialContratosDialog(QDialog):
             item_estado.setForeground(QBrush(fg))
             cantidad += 1
 
+        if cantidad == 0:
+            self.table.insertRow(0)
+            item = QTableWidgetItem(
+                "Todavia no hay contratos en historial.\n"
+                "Cuando des de baja uno desde Contratos, aparecera aqui."
+            )
+            item.setFlags(Qt.NoItemFlags)
+            self.table.setSpan(0, 0, 1, self.table.columnCount())
+            self.table.setItem(0, 0, item)
+
         self.label_resumen.setText(
             f"Contratos en historial: {cantidad}. "
             "Aqui se muestran los contratos dados de baja."
@@ -4970,6 +5162,13 @@ class ClientesDialog(QDialog):
         )
         self.input_dni.editingFinished.connect(self._formatear_input_dni)
         self.input_nombre = QLineEdit()
+        self.input_nombre.setMaxLength(80)
+        self.input_nombre.setValidator(
+            QRegularExpressionValidator(
+                QRegularExpression(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü' -]{0,80}"),
+                self.input_nombre,
+            )
+        )
         self.input_direccion = QLineEdit()
         self.input_telefono = QLineEdit()
         self.input_nacimiento = QDateEdit()
@@ -5021,6 +5220,7 @@ class ClientesDialog(QDialog):
         self._completer_modelos.setCompletionMode(QCompleter.PopupCompletion)
         self.input_modelo.setCompleter(self._completer_modelos)
         self.combo_tipo_vehiculo = QComboBox()
+        self.combo_tipo_vehiculo.addItem("Seleccionar tipo...", "")
         self.combo_tipo_vehiculo.addItem("Auto", "AUTO")
         self.combo_tipo_vehiculo.addItem("Moto", "MOTO")
         self.combo_tipo_vehiculo.addItem("Camioneta", "CAMIONETA")
@@ -5538,7 +5738,7 @@ class ClientesDialog(QDialog):
             "nacimiento": self.input_nacimiento.date().toString("yyyy-MM-dd"),
             "patente": self.input_patente.text().strip().upper(),
             "modelo": self.input_modelo.text().strip(),
-            "tipo_vehiculo": self.combo_tipo_vehiculo.currentData() or "AUTO",
+            "tipo_vehiculo": self.combo_tipo_vehiculo.currentData(),
         }
 
     def _actualizar_snapshot_form(self):
@@ -5550,7 +5750,26 @@ class ClientesDialog(QDialog):
             return False
         return self._snapshot_form() != base
 
+    def _formulario_cliente_vacio(self):
+        snap = self._snapshot_form()
+        return (
+            not snap["dni"]
+            and not snap["nombre"]
+            and not snap["direccion"]
+            and not snap["telefono"]
+            and not snap["patente"]
+            and not snap["modelo"]
+            and not str(snap["tipo_vehiculo"] or "").strip()
+        )
+
     def _nuevo_cliente(self):
+        if self._formulario_cliente_vacio():
+            QMessageBox.information(
+                self,
+                "Cliente",
+                "El formulario ya esta vacio.\nCompleta los datos del cliente antes de usar este boton.",
+            )
+            return
         if self._hay_cambios_sin_guardar():
             confirmar = QMessageBox.question(
                 self,
@@ -5584,17 +5803,38 @@ class ClientesDialog(QDialog):
 
     def _guardar_cliente(self):
         dni = self._formatear_input_dni()
-        nombre = self.input_nombre.text().strip()
+        nombre = " ".join(self.input_nombre.text().strip().split())
         direccion = self.input_direccion.text().strip()
         telefono = self.input_telefono.text().strip()
         fecha = self.input_nacimiento.date().toString("yyyy-MM-dd")
 
+        if self._formulario_cliente_vacio():
+            QMessageBox.information(
+                self,
+                "Cliente",
+                "El formulario esta vacio.\nCompleta al menos DNI y nombre antes de guardar.",
+            )
+            return False
         if len(dni) != 8:
             QMessageBox.warning(self, "Datos", "El DNI debe tener exactamente 8 numeros.")
             return False
         if not nombre:
             QMessageBox.warning(self, "Datos", "El nombre es obligatorio.")
             return False
+        if not direccion:
+            QMessageBox.warning(self, "Datos", "La direccion es obligatoria.")
+            return False
+        if not telefono:
+            QMessageBox.warning(self, "Datos", "El telefono es obligatorio.")
+            return False
+        if not _nombre_cliente_valido(nombre):
+            QMessageBox.warning(
+                self,
+                "Datos",
+                "El nombre solo puede contener letras y espacios.",
+            )
+            return False
+        self.input_nombre.setText(nombre)
         if not _antirebote_iniciar(self, "clientes_guardar"):
             return False
 
@@ -5667,6 +5907,11 @@ class ClientesDialog(QDialog):
     def _cambiar_activo(self, activo):
         cliente_id = self._selected_cliente_id()
         if not cliente_id:
+            QMessageBox.warning(
+                self,
+                "Cliente",
+                "Selecciona un cliente en la lista antes de activarlo o desactivarlo.",
+            )
             return
         if int(activo or 0) == 0:
             contratos_activos = self._contar_contratos_activos_cliente(cliente_id)
@@ -5798,7 +6043,12 @@ class ClientesDialog(QDialog):
         texto = self.input_patente.text()
         if not texto:
             return
-        self.input_patente.setText(_formatear_patente(texto))
+        patente_fmt = _formatear_patente(texto)
+        self.input_patente.setText(patente_fmt)
+        if _patente_es_moto(texto) and _tipo_vehiculo_habilitado_cochera("MOTO"):
+            idx = self.combo_tipo_vehiculo.findData("MOTO")
+            if idx >= 0:
+                self.combo_tipo_vehiculo.setCurrentIndex(idx)
 
     def _agregar_vehiculo(self):
         if not self._validar_cliente_activo_seleccionado("agregar vehiculos"):
@@ -5814,22 +6064,45 @@ class ClientesDialog(QDialog):
         patente = _normalizar_patente(self.input_patente.text())
         self.input_patente.setText(_formatear_patente(patente))
         if not patente:
+            QMessageBox.warning(
+                self,
+                "Patente",
+                "Escribe una patente antes de agregar el vehiculo al cliente.",
+            )
             return
         if not _patente_formato_valido(patente):
             QMessageBox.warning(
                 self,
                 "Patente",
-                "Patente invalida. Formatos validos: AA 123 AA o AAA 123.",
+                "Patente invalida. Formatos validos: AA 123 AA, AAA 123 o 123 ABC.",
             )
             return
+        if _patente_es_moto(patente):
+            if not _tipo_vehiculo_habilitado_cochera("MOTO"):
+                QMessageBox.warning(
+                    self,
+                    "Tipo no permitido",
+                    "El tipo Moto no esta habilitado para cochera.\n"
+                    "Revisalo en Configuracion > Sistema > Tipos en cochera.",
+                )
+                return
+            idx = self.combo_tipo_vehiculo.findData("MOTO")
+            if idx >= 0:
+                self.combo_tipo_vehiculo.setCurrentIndex(idx)
         if not _antirebote_iniciar(self, "clientes_agregar_vehiculo"):
             return
         modelo = self.input_modelo.text().strip()
         if modelo:
             modelo = " ".join(modelo.split())
-        tipo_vehiculo = _normalizar_tipo_vehiculo(
-            self.combo_tipo_vehiculo.currentData() or self.combo_tipo_vehiculo.currentText()
-        )
+        tipo_raw = self.combo_tipo_vehiculo.currentData()
+        if not str(tipo_raw or "").strip():
+            QMessageBox.warning(
+                self,
+                "Vehiculo",
+                "No se establecio el tipo de vehiculo.\nSelecciona si la patente corresponde a Auto, Moto o Camioneta antes de agregarla.",
+            )
+            return
+        tipo_vehiculo = _normalizar_tipo_vehiculo(tipo_raw)
         conn = None
         try:
             conn = get_connection()
@@ -5875,9 +6148,19 @@ class ClientesDialog(QDialog):
             return
         row = self.vehiculos_table.currentRow()
         if row < 0:
+            QMessageBox.warning(
+                self,
+                "Vehiculo",
+                "Selecciona una patente de la lista antes de eliminarla.",
+            )
             return
         item = self.vehiculos_table.item(row, 0)
         if not item:
+            QMessageBox.warning(
+                self,
+                "Vehiculo",
+                "Selecciona una patente de la lista antes de eliminarla.",
+            )
             return
         if not _antirebote_iniciar(self, "clientes_eliminar_vehiculo"):
             return
@@ -6178,6 +6461,16 @@ class EstadoCuentaDialog(QDialog):
         self.btn_transferencia.setProperty("variant", "neutral")
         self.btn_exportar_pdf.setProperty("variant", "info")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_actualizar.setToolTip(
+            "Vuelve a cargar los contratos, pagos y saldos del cliente."
+        )
+        self.btn_transferencia.setToolTip(
+            "Abre los datos de alias y CBU para compartir una transferencia."
+        )
+        self.btn_exportar_pdf.setToolTip(
+            "Genera un PDF con el resumen de contratos y pagos del cliente."
+        )
+        self.btn_cerrar.setToolTip("Cierra el estado de cuenta del cliente.")
         acciones.addStretch(1)
         acciones.addWidget(self.btn_actualizar)
         acciones.addWidget(self.btn_transferencia)
@@ -6376,6 +6669,14 @@ class EstadoCuentaDialog(QDialog):
             self.table_contratos.setItem(r, 4, QTableWidgetItem(row["estado"]))
             self.table_contratos.setItem(r, 5, QTableWidgetItem(self._fmt_money(row["deuda"])))
             self.table_contratos.setItem(r, 6, QTableWidgetItem(row["activo"]))
+        if not data["contratos"]:
+            self.table_contratos.insertRow(0)
+            item = QTableWidgetItem(
+                "Este cliente todavia no tiene contratos cargados."
+            )
+            item.setFlags(Qt.NoItemFlags)
+            self.table_contratos.setSpan(0, 0, 1, self.table_contratos.columnCount())
+            self.table_contratos.setItem(0, 0, item)
 
         self.table_pagos.setRowCount(0)
         for row in data["pagos"]:
@@ -6386,9 +6687,27 @@ class EstadoCuentaDialog(QDialog):
             self.table_pagos.setItem(r, 2, QTableWidgetItem(row["metodo"]))
             self.table_pagos.setItem(r, 3, QTableWidgetItem(str(row["id_contrato"])))
             self.table_pagos.setItem(r, 4, QTableWidgetItem(row["espacio"]))
+        if not data["pagos"]:
+            self.table_pagos.insertRow(0)
+            item = QTableWidgetItem(
+                "Todavia no hay pagos registrados para este cliente."
+            )
+            item.setFlags(Qt.NoItemFlags)
+            self.table_pagos.setSpan(0, 0, 1, self.table_pagos.columnCount())
+            self.table_pagos.setItem(0, 0, item)
         self._data_cache = data
 
     def _abrir_transferencia(self):
+        alias = (_config_get("empresa_alias", "") or "").strip()
+        cbu = (_config_get("empresa_cbu", "") or "").strip()
+        if not alias and not cbu:
+            QMessageBox.warning(
+                self,
+                "Transferencia",
+                "Todavia no hay alias ni CBU configurados.\n"
+                "Cargalos en Configuracion > General antes de compartir datos de transferencia.",
+            )
+            return
         dlg = DatosTransferenciaDialog(self)
         dlg.exec()
 
@@ -6512,11 +6831,19 @@ class TarifaDialog(QDialog):
         buttons.addStretch(1)
         self.btn_guardar = QPushButton("Guardar")
         self.btn_cancelar = QPushButton("Cancelar")
+        self.btn_guardar.setProperty("variant", "success")
+        self.btn_cancelar.setProperty("variant", "neutral")
+        self.btn_guardar.setToolTip(
+            "Guarda los precios actuales de estacionamiento y cochera."
+        )
+        self.btn_cancelar.setToolTip(
+            "Cierra esta ventana. Si cambiaste algo, la app te preguntara si quieres guardarlo."
+        )
         buttons.addWidget(self.btn_guardar)
         buttons.addWidget(self.btn_cancelar)
         layout.addLayout(buttons)
 
-        self.btn_guardar.clicked.connect(self._guardar)
+        self.btn_guardar.clicked.connect(lambda: self._guardar(mostrar_mensaje=True))
         self.btn_cancelar.clicked.connect(self.reject)
         _instalar_enter_navegacion(
             self,
@@ -6617,6 +6944,14 @@ class TarifaDialog(QDialog):
         precio_hora_camioneta = float(self.input_precio_hora_camioneta.value())
         precio_mensual_auto = float(self.input_precio_mensual_auto.value())
         precio_mensual_camioneta = float(self.input_precio_mensual_camioneta.value())
+        if not self._hay_cambios_sin_guardar():
+            if mostrar_mensaje:
+                QMessageBox.information(
+                    self,
+                    "Tarifas",
+                    "No hay cambios nuevos para guardar.",
+                )
+            return True
         if (
             precio_hora_auto <= 0
             or precio_hora_moto <= 0
@@ -7104,7 +7439,7 @@ class MapaCocheraDialog(QDialog):
         self.btn_zoom_in.clicked.connect(self._zoom_in)
         self.btn_zoom_out.clicked.connect(self._zoom_out)
         self.btn_zoom_reset.clicked.connect(self._zoom_reset)
-        self.btn_guardar.clicked.connect(self._guardar)
+        self.btn_guardar.clicked.connect(lambda: self._guardar(mostrar_mensaje=True))
         self.btn_recargar.clicked.connect(self._recargar)
 
         self._zoom_factor = 1.0
@@ -7339,6 +7674,11 @@ class MapaCocheraDialog(QDialog):
         self._aplicar_swatch(self._legend_swatch_libre, self._color_libre)
         self._aplicar_colores_items()
         self._actualizar_colores_escena()
+        QMessageBox.information(
+            self,
+            "Mapa",
+            "Los colores del mapa se actualizaron correctamente.",
+        )
 
     def _aplicar_colores_items(self):
         for item in self.scene.items():
@@ -7366,6 +7706,17 @@ class MapaCocheraDialog(QDialog):
                 return True
         return False
 
+    def _item_requerido_para(self, accion):
+        item = self._item_seleccionado()
+        if item:
+            return item
+        QMessageBox.warning(
+            self,
+            "Mapa",
+            f"Selecciona un espacio del mapa antes de {accion}.",
+        )
+        return None
+
     def _agregar(self):
         codigo, ok = QInputDialog.getText(self, "Nuevo espacio", "Codigo (ej: A1)")
         if not ok:
@@ -7389,24 +7740,41 @@ class MapaCocheraDialog(QDialog):
 
         size = QRectF(0, 0, 80, 50)
         item = EspacioItem(codigo, size, self._color_libre, estado="LIBRE", grid=self._grid)
-        offset = 10 + len(self.scene.items()) * 10
-        x_snap, y_snap = self._snap_a_cuadricula(offset, offset)
+        if bool(self.scene.property("snap_enabled")):
+            espacios = [it for it in self.scene.items() if isinstance(it, EspacioItem)]
+            if espacios:
+                ultimo = max(
+                    espacios,
+                    key=lambda it: (
+                        round(float(it.pos().y()) / max(float(self._paso_guia_y), 1.0)),
+                        round(float(it.pos().x()) / max(float(self._paso_guia_x), 1.0)),
+                    ),
+                )
+                nuevo_x = float(ultimo.pos().x()) + float(ultimo.rect().width())
+                nuevo_y = float(ultimo.pos().y())
+                x_snap, y_snap = self._snap_a_cuadricula(nuevo_x, nuevo_y)
+            else:
+                x_snap, y_snap = self._snap_a_cuadricula(10, 10)
+        else:
+            offset = 10 + len(self.scene.items()) * 10
+            x_snap, y_snap = self._snap_a_cuadricula(offset, offset)
         item.setPos(x_snap, y_snap)
         if not self._editable:
             item.setFlags(QGraphicsItem.ItemIsSelectable)
         self.scene.addItem(item)
         self._set_mapa_dirty(True)
         self._actualizar_area_trabajo()
+        QMessageBox.information(
+            self,
+            "Mapa",
+            f"Espacio {codigo} agregado al mapa.\nRecuerda guardar para dejar el cambio fijo.",
+        )
 
     def _renombrar(self):
-        item = self._item_seleccionado()
+        item = self._item_requerido_para("renombrarlo")
         if not item:
-            QMessageBox.warning(
-                self,
-                "Seleccion",
-                "Selecciona un espacio del mapa antes de cambiarle el codigo.",
-            )
             return
+        codigo_anterior = item.codigo
         nuevo, ok = QInputDialog.getText(self, "Renombrar", "Nuevo codigo")
         if not ok:
             return
@@ -7416,6 +7784,13 @@ class MapaCocheraDialog(QDialog):
                 self,
                 "Codigo",
                 "Escribe el nuevo codigo antes de guardar el cambio.",
+            )
+            return
+        if nuevo == codigo_anterior:
+            QMessageBox.information(
+                self,
+                "Mapa",
+                "El codigo no cambio.\nNo hay nada nuevo para guardar.",
             )
             return
         if self._codigo_en_escena(nuevo):
@@ -7428,11 +7803,17 @@ class MapaCocheraDialog(QDialog):
             return
         item.set_codigo(nuevo)
         self._set_mapa_dirty(True)
+        QMessageBox.information(
+            self,
+            "Mapa",
+            f"Espacio {codigo_anterior} renombrado a {nuevo}.\nRecuerda guardar para dejar el cambio fijo.",
+        )
 
     def _eliminar(self):
-        item = self._item_seleccionado()
+        item = self._item_requerido_para("eliminarlo")
         if not item:
             return
+        codigo = item.codigo
         confirmar = QMessageBox.question(
             self,
             "Eliminar",
@@ -7446,6 +7827,11 @@ class MapaCocheraDialog(QDialog):
         self._eliminados.add(item.codigo)
         self.scene.removeItem(item)
         self._set_mapa_dirty(True)
+        QMessageBox.information(
+            self,
+            "Mapa",
+            f"Espacio {codigo} quitado del mapa.\nRecuerda guardar para confirmar la eliminacion.",
+        )
 
     def _item_seleccionado(self):
         for item in self.scene.selectedItems():
@@ -7537,7 +7923,8 @@ class MapaCocheraDialog(QDialog):
             id_espacio = row["id_espacio"]
 
             cur.execute(
-                "SELECT m.id_movimiento, m.fecha_ingreso, v.patente, "
+                "SELECT m.id_movimiento, m.fecha_ingreso, m.id_tarifa_aplicada, "
+                "m.tarifa_hora_aplicada, v.patente, "
                 "COALESCE(NULLIF(TRIM(m.tipo_vehiculo), ''), 'AUTO') AS tipo_vehiculo "
                 "FROM movimientos m "
                 "JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
@@ -7570,22 +7957,25 @@ class MapaCocheraDialog(QDialog):
 
             tarifa_row = None
             if mov_activos > 0:
-                cur.execute(
-                    "SELECT precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
-                    "FROM tarifas WHERE activa = 1 "
-                    "ORDER BY fecha_desde DESC LIMIT 1"
-                )
-                tarifa_row = cur.fetchone()
-                if not tarifa_row:
-                    QMessageBox.warning(
-                        self,
-                        "Desocupar",
-                        "No hay tarifa por hora definida para calcular el cierre del estacionamiento.\n"
-                        "Carga una tarifa antes de desocupar este espacio.",
-                    )
-                    return
                 for mov in movimientos_activos:
-                    tarifa_mov = _tarifa_hora_desde_row(tarifa_row, mov["tipo_vehiculo"])
+                    tarifa_mov = float(mov["tarifa_hora_aplicada"] or 0.0)
+                    if tarifa_mov <= 0:
+                        if tarifa_row is None:
+                            cur.execute(
+                                "SELECT precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
+                                "FROM tarifas WHERE activa = 1 "
+                                "ORDER BY fecha_desde DESC LIMIT 1"
+                            )
+                            tarifa_row = cur.fetchone()
+                        if not tarifa_row:
+                            QMessageBox.warning(
+                                self,
+                                "Desocupar",
+                                "No hay tarifa por hora definida para calcular el cierre del estacionamiento.\n"
+                                "Carga una tarifa antes de desocupar este espacio.",
+                            )
+                            return
+                        tarifa_mov = _tarifa_hora_desde_row(tarifa_row, mov["tipo_vehiculo"])
                     if tarifa_mov is None:
                         QMessageBox.warning(
                             self,
@@ -7617,7 +8007,9 @@ class MapaCocheraDialog(QDialog):
                     dt_ing = _parse_fecha_db(fecha_ingreso)
                     if not dt_ing:
                         dt_ing = salida_dt
-                    tarifa_mov = _tarifa_hora_desde_row(tarifa_row, mov["tipo_vehiculo"])
+                    tarifa_mov = float(mov["tarifa_hora_aplicada"] or 0.0)
+                    if tarifa_mov <= 0:
+                        tarifa_mov = _tarifa_hora_desde_row(tarifa_row, mov["tipo_vehiculo"])
                     _, total = _calcular_total_estadia(
                         dt_ing,
                         salida_dt,
@@ -7764,22 +8156,52 @@ class MapaCocheraDialog(QDialog):
             )
             if respuesta != QMessageBox.Yes:
                 return
+        elif self._editable and not self._mapa_tiene_cambios():
+            QMessageBox.information(
+                self,
+                "Limpiar mapa",
+                "No hay cambios sin guardar para deshacer.",
+            )
+            return
         self._cargar()
-
-    def _set_cochera(self, valor):
-        item = self._item_seleccionado()
-        if not item:
-            QMessageBox.warning(
+        if self._editable:
+            QMessageBox.information(
                 self,
                 "Mapa",
-                "Selecciona un espacio del mapa antes de cambiar su estado.",
+                "Mapa recargado correctamente.",
             )
+
+    def _set_cochera(self, valor):
+        item = self._item_requerido_para(
+            "marcarlo como cochera" if valor else "quitarle la marca de cochera"
+        )
+        if not item:
             return
         codigo = item.codigo
         conn = None
         try:
             conn = get_connection()
             cur = conn.cursor()
+            cur.execute(
+                "SELECT COALESCE(es_reservado, 0) AS es_reservado FROM espacios WHERE codigo = ?",
+                (codigo,),
+            )
+            row_actual = cur.fetchone()
+            es_cochera_actual = int((row_actual["es_reservado"] if row_actual else 0) or 0) == 1
+            if valor and es_cochera_actual:
+                QMessageBox.information(
+                    self,
+                    "Cochera",
+                    f"El espacio {codigo} ya esta marcado como cochera.",
+                )
+                return
+            if not valor and not es_cochera_actual:
+                QMessageBox.information(
+                    self,
+                    "Cochera",
+                    f"El espacio {codigo} ya esta disponible para estacionamiento.",
+                )
+                return
             if not valor:
                 cur.execute(
                     "SELECT COUNT(*) FROM cochera_contratos "
@@ -7829,6 +8251,16 @@ class MapaCocheraDialog(QDialog):
                 conn.close()
 
         self._actualizar_item_por_codigo(item)
+        QMessageBox.information(
+            self,
+            "Cochera",
+            (
+                f"El espacio {codigo} se marco como cochera."
+                if valor
+                else f"El espacio {codigo} dejo de estar marcado como cochera."
+            )
+            + "\nRecuerda guardar para dejar el cambio fijo.",
+        )
 
     def _actualizar_item_por_codigo(self, item):
         conn = None
@@ -7927,6 +8359,14 @@ class MapaCocheraDialog(QDialog):
             item.set_info(info)
 
     def _guardar(self, mostrar_mensaje=True):
+        if not self._mapa_tiene_cambios():
+            if mostrar_mensaje:
+                QMessageBox.information(
+                    self,
+                    "Mapa",
+                    "No hay cambios pendientes para guardar.",
+                )
+            return True
         conn = None
         try:
             conn = get_connection()
@@ -8057,6 +8497,11 @@ class VencimientosDialog(QDialog):
         self.btn_actualizar = QPushButton("Actualizar")
         self.btn_cerrar = QPushButton("Cerrar")
         self.btn_actualizar.setProperty("variant", "neutral")
+        self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_actualizar.setToolTip(
+            "Vuelve a consultar contratos vencidos y proximos a vencer."
+        )
+        self.btn_cerrar.setToolTip("Cierra esta ventana de vencimientos.")
         acciones_finales.addStretch(1)
         acciones_finales.addWidget(self.btn_actualizar)
         acciones_finales.addWidget(self.btn_cerrar)
@@ -8083,6 +8528,8 @@ class VencimientosDialog(QDialog):
         self.btn_wsp_hoy.clicked.connect(self._enviar_whatsapp_vence_hoy)
         self.btn_actualizar.clicked.connect(self._cargar)
         self.btn_cerrar.clicked.connect(self.accept)
+        self.lista_vencidos.itemSelectionChanged.connect(self._actualizar_estado_acciones)
+        self.lista_proximos.itemSelectionChanged.connect(self._actualizar_estado_acciones)
 
         self._cargar()
 
@@ -8195,6 +8642,7 @@ class VencimientosDialog(QDialog):
         nombre = (row.get("nombre") or "").strip() or "cliente"
         modelo = (row.get("modelo") or "").strip()
         monto = float(row.get("monto_mensual") or 0.0)
+        tipo_vehiculo = row.get("tipo_vehiculo") or "AUTO"
         fecha_venc = QDate.fromString(row.get("fecha_vencimiento") or "", "yyyy-MM-dd")
         hoy = QDate.currentDate()
         vencimiento = "Sin vencimiento"
@@ -8207,13 +8655,12 @@ class VencimientosDialog(QDialog):
                 vencimiento = f"{base} (vence hoy)"
             else:
                 vencimiento = f"{base} (en {dias} dia/s)"
-        cuota_actual = monto if monto > 0 else 0.0
         return {
             "nombre": nombre,
             "telefono": (row.get("telefono") or "").strip(),
             "modelo": modelo,
             "vencimiento": vencimiento,
-            "deuda": _fmt_money(cuota_actual),
+            "deuda": _texto_cuota_recordatorio(tipo_vehiculo, monto),
             "codigo": (row.get("codigo") or "").strip() or "-",
             "patente": _formatear_patente(row.get("patente") or ""),
             "id_contrato": row.get("id_contrato"),
@@ -8260,10 +8707,82 @@ class VencimientosDialog(QDialog):
                 conn.close()
         return ids
 
-    def _enviar_whatsapp_item(self, lista, categoria):
-        item = lista.currentItem() if lista is not None else None
+    def _fila_valida_desde_item(self, item):
         if not item:
-            QMessageBox.warning(self, "WhatsApp", "Selecciona un contrato.")
+            return None
+        row = item.data(Qt.UserRole)
+        return row if row else None
+
+    def _filas_validas_lista(self, lista):
+        filas = []
+        if lista is None:
+            return filas
+        for idx in range(lista.count()):
+            item = lista.item(idx)
+            row = self._fila_valida_desde_item(item)
+            if row:
+                filas.append(row)
+        return filas
+
+    def _actualizar_estado_acciones(self):
+        row_vencido = self._fila_valida_desde_item(self.lista_vencidos.currentItem())
+        row_proximo = self._fila_valida_desde_item(self.lista_proximos.currentItem())
+        filas_vencidos = self._filas_validas_lista(self.lista_vencidos)
+        filas_proximos = self._filas_validas_lista(self.lista_proximos)
+        filas_hoy = [
+            row
+            for row in filas_proximos
+            if self._dias_hasta(row.get("fecha_vencimiento")) == 0
+        ]
+
+        self.btn_wsp_vencido.setEnabled(bool(row_vencido))
+        self.btn_wsp_proximo.setEnabled(bool(row_proximo))
+        self.btn_wsp_vencidos.setEnabled(bool(filas_vencidos))
+        self.btn_wsp_proximos.setEnabled(bool(filas_proximos))
+        self.btn_wsp_hoy.setEnabled(bool(filas_hoy))
+
+        self.btn_wsp_vencido.setToolTip(
+            "Enviar recordatorio al contrato vencido seleccionado."
+            if row_vencido
+            else "Selecciona un contrato vencido de la lista para enviarle WhatsApp."
+        )
+        self.btn_wsp_proximo.setToolTip(
+            "Enviar recordatorio al contrato proximo seleccionado."
+            if row_proximo
+            else "Selecciona un contrato proximo de la lista para enviarle WhatsApp."
+        )
+        self.btn_wsp_vencidos.setToolTip(
+            f"Abrir WhatsApp para los {len(filas_vencidos)} contrato/s vencido/s."
+            if filas_vencidos
+            else "No hay contratos vencidos disponibles para enviar."
+        )
+        self.btn_wsp_proximos.setToolTip(
+            f"Abrir WhatsApp para los {len(filas_proximos)} contrato/s proximo/s."
+            if filas_proximos
+            else "No hay contratos proximos disponibles para enviar."
+        )
+        self.btn_wsp_hoy.setToolTip(
+            f"Abrir WhatsApp para los {len(filas_hoy)} contrato/s que vencen hoy."
+            if filas_hoy
+            else "No hay contratos que venzan hoy en la lista de proximos."
+        )
+
+    def _enviar_whatsapp_item(self, lista, categoria):
+        if lista is None:
+            QMessageBox.warning(
+                self,
+                "WhatsApp",
+                "Selecciona un contrato de la lista antes de abrir WhatsApp.",
+            )
+            return
+        seleccionados = lista.selectedItems()
+        item = seleccionados[0] if seleccionados else None
+        if not item:
+            QMessageBox.warning(
+                self,
+                "WhatsApp",
+                "Selecciona un contrato de la lista antes de abrir WhatsApp.",
+            )
             return
         row = item.data(Qt.UserRole)
         if not row:
@@ -8411,7 +8930,8 @@ class VencimientosDialog(QDialog):
                 "SELECT cc.id_contrato, c.nombre, COALESCE(c.telefono, '') AS telefono, "
                 "COALESCE(e.codigo, '-') AS codigo, cc.fecha_vencimiento, "
                 "cc.monto_mensual, COALESCE(v_sel.patente, '') AS patente, "
-                "COALESCE(v_sel.modelo, '') AS modelo "
+                "COALESCE(v_sel.modelo, '') AS modelo, "
+                "COALESCE(NULLIF(TRIM(v_sel.tipo_vehiculo), ''), 'AUTO') AS tipo_vehiculo "
                 "FROM cochera_contratos cc "
                 "JOIN clientes c ON c.id_cliente = cc.id_cliente "
                 "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
@@ -8457,7 +8977,8 @@ class VencimientosDialog(QDialog):
                 "SELECT cc.id_contrato, c.nombre, COALESCE(c.telefono, '') AS telefono, "
                 "COALESCE(e.codigo, '-') AS codigo, cc.fecha_vencimiento, "
                 "cc.monto_mensual, COALESCE(v_sel.patente, '') AS patente, "
-                "COALESCE(v_sel.modelo, '') AS modelo "
+                "COALESCE(v_sel.modelo, '') AS modelo, "
+                "COALESCE(NULLIF(TRIM(v_sel.tipo_vehiculo), ''), 'AUTO') AS tipo_vehiculo "
                 "FROM cochera_contratos cc "
                 "JOIN clientes c ON c.id_cliente = cc.id_cliente "
                 "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
@@ -8508,6 +9029,7 @@ class VencimientosDialog(QDialog):
         finally:
             if conn:
                 conn.close()
+        self._actualizar_estado_acciones()
 
 
 class HistorialDialog(QDialog):
@@ -8530,13 +9052,33 @@ class HistorialDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.table)
 
+        acciones = QHBoxLayout()
+        self.btn_actualizar = QPushButton("Actualizar")
+        self.btn_cerrar = QPushButton("Cerrar")
+        self.btn_actualizar.setProperty("variant", "neutral")
+        self.btn_cerrar.setProperty("variant", "neutral")
+        self.input_buscar.setToolTip(
+            "Filtra el historial por usuario, accion o detalle."
+        )
+        self.btn_actualizar.setToolTip(
+            "Vuelve a consultar los ultimos cambios registrados en la auditoria."
+        )
+        self.btn_cerrar.setToolTip("Cierra esta ventana y vuelve al menu anterior.")
+        acciones.addStretch(1)
+        acciones.addWidget(self.btn_actualizar)
+        acciones.addWidget(self.btn_cerrar)
+        layout.addLayout(acciones)
+
         self.input_buscar.textChanged.connect(self._cargar)
+        self.btn_actualizar.clicked.connect(self._cargar)
+        self.btn_cerrar.clicked.connect(self.accept)
         self._cargar()
 
     def _cargar(self):
         texto = self.input_buscar.text().strip()
         self.table.setRowCount(0)
         conn = None
+        cantidad = 0
         try:
             conn = get_connection()
             cur = conn.cursor()
@@ -8560,11 +9102,23 @@ class HistorialDialog(QDialog):
                 self.table.setItem(r, 1, QTableWidgetItem(row["usuario"] or ""))
                 self.table.setItem(r, 2, QTableWidgetItem(row["accion"]))
                 self.table.setItem(r, 3, QTableWidgetItem(row["detalle"] or ""))
+                cantidad += 1
         except sqlite3.Error:
             pass
         finally:
             if conn:
                 conn.close()
+        if cantidad == 0:
+            self.table.insertRow(0)
+            texto_vacio = (
+                "No hay cambios que coincidan con la busqueda."
+                if texto
+                else "Todavia no hay movimientos en el historial de cambios."
+            )
+            item = QTableWidgetItem(texto_vacio)
+            item.setFlags(Qt.NoItemFlags)
+            self.table.setSpan(0, 0, 1, self.table.columnCount())
+            self.table.setItem(0, 0, item)
 
 
 class ReportesDialog(QDialog):
@@ -8595,6 +9149,10 @@ class ReportesDialog(QDialog):
         self.input_hasta.setDate(hoy)
         filtro.addWidget(self.input_hasta)
         self.btn_actualizar = QPushButton("Actualizar")
+        self.btn_actualizar.setProperty("variant", "neutral")
+        self.btn_actualizar.setToolTip(
+            "Vuelve a cargar los movimientos segun el periodo seleccionado."
+        )
         filtro.addWidget(self.btn_actualizar)
         filtro.addStretch(1)
         layout.addLayout(filtro)
@@ -8612,13 +9170,18 @@ class ReportesDialog(QDialog):
         filtros.addWidget(QLabel("Tipo"))
         self.combo_tipo = QComboBox()
         self.combo_tipo.addItems(["Todos", "Cochera", "Estacionamiento"])
+        self.combo_tipo.setToolTip("Filtra el historial por tipo de operacion.")
         filtros.addWidget(self.combo_tipo)
         filtros.addWidget(QLabel("Metodo"))
         self.combo_metodo = QComboBox()
         self.combo_metodo.addItems(["Todos", "Efectivo", "Transferencia", "Tarjeta", "Otro"])
+        self.combo_metodo.setToolTip("Filtra el historial por metodo de cobro.")
         filtros.addWidget(self.combo_metodo)
         self.input_buscar = QLineEdit()
         self.input_buscar.setPlaceholderText("Buscar cliente/patente/espacio")
+        self.input_buscar.setToolTip(
+            "Busca por cliente, patente o espacio dentro del historial filtrado."
+        )
         filtros.addWidget(self.input_buscar)
         filtros.addStretch(1)
         layout.addLayout(filtros)
@@ -8644,6 +9207,10 @@ class ReportesDialog(QDialog):
 
         acciones = QHBoxLayout()
         self.btn_export_excel = QPushButton("Exportar Excel")
+        self.btn_export_excel.setProperty("variant", "info")
+        self.btn_export_excel.setToolTip(
+            "Genera un Excel con el resumen y el detalle visible en Reportes."
+        )
         acciones.addWidget(self.btn_export_excel)
         self.btn_eliminar = QPushButton("Eliminar")
         self.btn_eliminar.setProperty("variant", "danger")
@@ -8766,6 +9333,17 @@ class ReportesDialog(QDialog):
             self.table_historial.setItem(r, 6, QTableWidgetItem(row["espacio"]))
             id_val = row["contrato_id"] or row["movimiento_id"] or ""
             self.table_historial.setItem(r, 7, QTableWidgetItem(str(id_val)))
+        if not detalle:
+            self.table_historial.insertRow(0)
+            texto_vacio = (
+                "No hay movimientos en el periodo y filtros actuales."
+                if self._detalle_cache
+                else "Todavia no hay movimientos para mostrar en Reportes."
+            )
+            item = QTableWidgetItem(texto_vacio)
+            item.setFlags(Qt.NoItemFlags)
+            self.table_historial.setSpan(0, 0, 1, self.table_historial.columnCount())
+            self.table_historial.setItem(0, 0, item)
         self._actualizar_estado_eliminar()
 
     def _actualizar_estado_eliminar(self):
@@ -9224,6 +9802,10 @@ class CajaDiariaDialog(QDialog):
         self.input_fecha.setDate(QDate.currentDate())
         filtros.addWidget(self.input_fecha)
         self.btn_actualizar = QPushButton("Actualizar")
+        self.btn_actualizar.setProperty("variant", "neutral")
+        self.btn_actualizar.setToolTip(
+            "Vuelve a calcular el resumen y el arqueo del dia seleccionado."
+        )
         filtros.addWidget(self.btn_actualizar)
         filtros.addStretch(1)
         layout.addLayout(filtros)
@@ -9266,6 +9848,15 @@ class CajaDiariaDialog(QDialog):
         self.btn_guardar_cierre.setProperty("variant", "success")
         self.btn_reabrir_cierre.setProperty("variant", "danger")
         self.btn_limpiar_cierre.setProperty("variant", "warning")
+        self.btn_guardar_cierre.setToolTip(
+            "Guarda el cierre del dia con los importes contados por metodo."
+        )
+        self.btn_reabrir_cierre.setToolTip(
+            "Vuelve a abrir un cierre ya guardado para corregirlo."
+        )
+        self.btn_limpiar_cierre.setToolTip(
+            "Limpia los importes contados y la observacion cargada en este cierre."
+        )
         acciones_cierre.addWidget(self.btn_guardar_cierre)
         acciones_cierre.addWidget(self.btn_reabrir_cierre)
         acciones_cierre.addWidget(self.btn_limpiar_cierre)
@@ -9537,6 +10128,15 @@ class CajaDiariaDialog(QDialog):
             return False
         try:
             fecha_key = self.input_fecha.date().toString("yyyy-MM-dd")
+            cierre_existente = svc_obtener_cierre_caja(fecha_key)
+            if cierre_existente and not self._hay_cambios_sin_guardar():
+                if mostrar_mensaje:
+                    QMessageBox.information(
+                        self,
+                        "Caja",
+                        "No hay cambios nuevos para guardar en este cierre.",
+                    )
+                return False
             cochera, est, total = svc_consultar_totales_caja(fecha_key)
             self.label_cochera.setText(_fmt_money(cochera))
             self.label_est.setText(_fmt_money(est))
@@ -9588,6 +10188,13 @@ class CajaDiariaDialog(QDialog):
             _antirebote_finalizar(self, "caja_guardar_cierre", cooldown_ms=700)
 
     def _limpiar_form_cierre(self):
+        if not self._hay_cambios_sin_guardar():
+            QMessageBox.information(
+                self,
+                "Caja",
+                "No hay cambios cargados para limpiar en este cierre.",
+            )
+            return
         for row in self._metodo_rows:
             row["input_contado"].setValue(float(row["esperado"] or 0.0))
         self.input_observacion.clear()
@@ -9705,6 +10312,13 @@ class BackupsDialog(QDialog):
         self.btn_restaurar.setProperty("variant", "warning")
         self.btn_eliminar.setProperty("variant", "danger")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_actualizar.setToolTip(
+            "Vuelve a cargar la lista de respaldos disponibles."
+        )
+        self.btn_crear.setToolTip(
+            "Genera un respaldo nuevo de la base de datos actual."
+        )
+        self.btn_cerrar.setToolTip("Cierra esta ventana de respaldos.")
         acciones.addWidget(self.btn_actualizar)
         acciones.addWidget(self.btn_crear)
         acciones.addWidget(self.btn_restaurar)
@@ -9718,6 +10332,7 @@ class BackupsDialog(QDialog):
         self.btn_restaurar.clicked.connect(self._restaurar_backup)
         self.btn_eliminar.clicked.connect(self._eliminar_backup)
         self.btn_cerrar.clicked.connect(self.reject)
+        self.lista.itemSelectionChanged.connect(self._actualizar_estado_acciones)
 
         self._cargar()
 
@@ -9743,10 +10358,38 @@ class BackupsDialog(QDialog):
 
     def _cargar(self):
         self.lista.clear()
-        for path in svc_listar_backups_db(limit=200):
+        paths = list(svc_listar_backups_db(limit=200))
+        if not paths:
+            item = QListWidgetItem("No hay respaldos disponibles.")
+            item.setFlags(Qt.NoItemFlags)
+            self.lista.addItem(item)
+            self._actualizar_estado_acciones()
+            return
+        for path in paths:
             item = QListWidgetItem(self._fmt_item(path))
             item.setData(Qt.UserRole, str(path))
             self.lista.addItem(item)
+        self._actualizar_estado_acciones()
+
+    def _actualizar_estado_acciones(self):
+        path = self._selected_path()
+        tiene_seleccion = path is not None
+        self.btn_restaurar.setEnabled(tiene_seleccion)
+        self.btn_eliminar.setEnabled(tiene_seleccion)
+        if tiene_seleccion:
+            self.btn_restaurar.setToolTip(
+                f"Restaura el respaldo seleccionado: {path.name}"
+            )
+            self.btn_eliminar.setToolTip(
+                f"Elimina el respaldo seleccionado: {path.name}"
+            )
+        else:
+            self.btn_restaurar.setToolTip(
+                "Selecciona un respaldo de la lista para restaurarlo."
+            )
+            self.btn_eliminar.setToolTip(
+                "Selecciona un respaldo de la lista para eliminarlo."
+            )
 
     def _crear_backup(self):
         if not _antirebote_iniciar(self, "backups_crear"):
@@ -9931,6 +10574,17 @@ class ConfiguracionDialog(QDialog):
         )
         self.combo_tema = QComboBox()
         self.combo_tema.addItems(["Oscuro", "Claro"])
+        self.check_coch_auto = QCheckBox("Permitir autos")
+        self.check_coch_moto = QCheckBox("Permitir motos")
+        self.check_coch_camioneta = QCheckBox("Permitir camionetas")
+        tipos_coch = QVBoxLayout()
+        tipos_coch.setContentsMargins(0, 0, 0, 0)
+        tipos_coch.setSpacing(4)
+        tipos_coch.addWidget(self.check_coch_auto)
+        tipos_coch.addWidget(self.check_coch_moto)
+        tipos_coch.addWidget(self.check_coch_camioneta)
+        cont_tipos_coch = QWidget()
+        cont_tipos_coch.setLayout(tipos_coch)
         self.check_est_auto = QCheckBox("Permitir autos")
         self.check_est_moto = QCheckBox("Permitir motos")
         self.check_est_camioneta = QCheckBox("Permitir camionetas")
@@ -9946,6 +10600,7 @@ class ConfiguracionDialog(QDialog):
         self.btn_ultra_rtx.setProperty("variant", "info")
         form_sistema.addRow("Resolucion", self.combo_resolucion)
         form_sistema.addRow("Tema", self.combo_tema)
+        form_sistema.addRow("Tipos en cochera", cont_tipos_coch)
         form_sistema.addRow("Tipos en estacionamiento", cont_tipos_est)
         form_sistema.addRow("Modo gamer", self.btn_ultra_rtx)
         self.tabs.addTab(tab_sistema, "Sistema")
@@ -9956,6 +10611,12 @@ class ConfiguracionDialog(QDialog):
         self.btn_cerrar = QPushButton("Cerrar")
         self.btn_guardar.setProperty("variant", "success")
         self.btn_cerrar.setProperty("variant", "neutral")
+        self.btn_guardar.setToolTip(
+            "Guarda los cambios de General, Reportes y Sistema."
+        )
+        self.btn_cerrar.setToolTip(
+            "Cierra Configuracion. Si cambiaste algo, la app te preguntara si quieres guardarlo."
+        )
         acciones.addWidget(self.btn_guardar)
         acciones.addWidget(self.btn_cerrar)
         layout.addLayout(acciones)
@@ -9987,7 +10648,10 @@ class ConfiguracionDialog(QDialog):
                 self.input_dir_tickets_salida: self.btn_carpetas_escritorio,
                 self.btn_carpetas_escritorio: self.btn_guardar,
                 self.combo_resolucion: self.combo_tema,
-                self.combo_tema: self.check_est_auto,
+                self.combo_tema: self.check_coch_auto,
+                self.check_coch_auto: self.check_coch_moto,
+                self.check_coch_moto: self.check_coch_camioneta,
+                self.check_coch_camioneta: self.check_est_auto,
                 self.check_est_auto: self.check_est_moto,
                 self.check_est_moto: self.check_est_camioneta,
                 self.check_est_camioneta: self.btn_guardar,
@@ -9996,6 +10660,34 @@ class ConfiguracionDialog(QDialog):
         self._cargar()
         if self._rol == "OPERADOR":
             self.tabs.removeTab(self._idx_tab_general)
+
+    def _snapshot_form(self):
+        return (
+            self.input_nombre.text().strip(),
+            self.input_telefono.text().strip(),
+            self.input_direccion.text().strip(),
+            self.input_alias.text().strip(),
+            self.input_cbu.text().strip(),
+            self.input_wa_template.toPlainText().strip(),
+            (self.input_moneda.text() or "$").strip() or "$",
+            self.input_dir_reportes.text().strip(),
+            self.input_dir_comprobantes.text().strip(),
+            self.input_dir_tickets_salida.text().strip(),
+            self.combo_resolucion.currentText(),
+            self.combo_tema.currentText(),
+            bool(self.check_coch_auto.isChecked()),
+            bool(self.check_coch_moto.isChecked()),
+            bool(self.check_coch_camioneta.isChecked()),
+            bool(self.check_est_auto.isChecked()),
+            bool(self.check_est_moto.isChecked()),
+            bool(self.check_est_camioneta.isChecked()),
+        )
+
+    def _actualizar_snapshot(self):
+        self._snapshot = self._snapshot_form()
+
+    def _hay_cambios_sin_guardar(self):
+        return getattr(self, "_snapshot", None) != self._snapshot_form()
 
     def _cargar(self):
         self.input_nombre.setText(_config_get("empresa_nombre", ""))
@@ -10015,9 +10707,13 @@ class ConfiguracionDialog(QDialog):
         self.combo_resolucion.setCurrentIndex(idx_res if idx_res >= 0 else 1)
         tema = (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower()
         self.combo_tema.setCurrentIndex(1 if tema == "claro" else 0)
+        self.check_coch_auto.setChecked(_config_get_bool("coch_perm_auto", True))
+        self.check_coch_moto.setChecked(_config_get_bool("coch_perm_moto", True))
+        self.check_coch_camioneta.setChecked(_config_get_bool("coch_perm_camioneta", True))
         self.check_est_auto.setChecked(_config_get_bool("est_perm_auto", True))
         self.check_est_moto.setChecked(_config_get_bool("est_perm_moto", True))
         self.check_est_camioneta.setChecked(_config_get_bool("est_perm_camioneta", True))
+        self._actualizar_snapshot()
 
     def _seleccionar_carpeta(self, input_destino):
         base = input_destino.text().strip() or str(Path(__file__).resolve().parent)
@@ -10071,9 +10767,19 @@ class ConfiguracionDialog(QDialog):
         dir_reportes = self.input_dir_reportes.text().strip()
         dir_comprobantes = self.input_dir_comprobantes.text().strip()
         dir_tickets_salida = self.input_dir_tickets_salida.text().strip()
+        coch_perm_auto = self.check_coch_auto.isChecked()
+        coch_perm_moto = self.check_coch_moto.isChecked()
+        coch_perm_camioneta = self.check_coch_camioneta.isChecked()
         est_perm_auto = self.check_est_auto.isChecked()
         est_perm_moto = self.check_est_moto.isChecked()
         est_perm_camioneta = self.check_est_camioneta.isChecked()
+        if not self._hay_cambios_sin_guardar():
+            QMessageBox.information(
+                self,
+                "Configuracion",
+                "No hay cambios nuevos para guardar.",
+            )
+            return
         try:
             if dir_reportes:
                 Path(dir_reportes).mkdir(parents=True, exist_ok=True)
@@ -10097,16 +10803,40 @@ class ConfiguracionDialog(QDialog):
             ok = _config_set("dir_tickets_salida", dir_tickets_salida) and ok
             ok = _config_set("ui_tema", tema) and ok
             ok = _config_set("ui_resolucion", resolucion) and ok
+            ok = _config_set("coch_perm_auto", "1" if coch_perm_auto else "0") and ok
+            ok = _config_set("coch_perm_moto", "1" if coch_perm_moto else "0") and ok
+            ok = _config_set("coch_perm_camioneta", "1" if coch_perm_camioneta else "0") and ok
             ok = _config_set("est_perm_auto", "1" if est_perm_auto else "0") and ok
             ok = _config_set("est_perm_moto", "1" if est_perm_moto else "0") and ok
             ok = _config_set("est_perm_camioneta", "1" if est_perm_camioneta else "0") and ok
             if not ok:
                 raise sqlite3.Error()
             _auditar(self, "Configuracion actualizada", "Datos generales del sistema")
+            self._actualizar_snapshot()
             QMessageBox.information(self, "Configuracion", "Cambios guardados.")
             self.accept()
         except (sqlite3.Error, OSError):
             _mostrar_error(self, "Error", "No se pudo guardar la configuracion.")
+
+    def closeEvent(self, event):
+        if not self._hay_cambios_sin_guardar():
+            event.accept()
+            return
+        respuesta = _confirmar_guardado_pendiente(
+            self,
+            "Hay cambios en Configuracion.\nQuieres guardarlos antes de salir?",
+        )
+        if respuesta == QMessageBox.Cancel:
+            event.ignore()
+            return
+        if respuesta == QMessageBox.No:
+            event.accept()
+            return
+        self._guardar()
+        if self.result() == QDialog.Accepted:
+            event.accept()
+        else:
+            event.ignore()
 
 
 def _usuarios_existen():
@@ -11202,19 +11932,47 @@ class VentanaPrincipal(QMainWindow):
         self.ui.btn_mapa_est.setVisible(es_admin or es_operador)
 
     def _abrir_tarifas(self):
+        if (self.rol or "").strip().upper() != "DUENO":
+            QMessageBox.warning(
+                self,
+                "Administracion",
+                "Solo un usuario DUENO puede abrir Tarifas.",
+            )
+            return
         dlg = TarifaDialog(self)
         dlg.exec()
         self._programar_popup_primeros_pasos()
 
     def _abrir_usuarios(self):
+        if (self.rol or "").strip().upper() != "DUENO":
+            QMessageBox.warning(
+                self,
+                "Administracion",
+                "Solo un usuario DUENO puede abrir Usuarios.",
+            )
+            return
         dlg = UsuariosDialog(self, usuario_actual=self.usuario)
         dlg.exec()
 
     def _abrir_historial(self):
+        if (self.rol or "").strip().upper() not in {"DUENO", "OPERADOR"}:
+            QMessageBox.warning(
+                self,
+                "Administracion",
+                "Tu usuario no tiene permisos para abrir Historial.",
+            )
+            return
         dlg = HistorialDialog(self)
         dlg.exec()
 
     def _abrir_cierre_caja(self):
+        if (self.rol or "").strip().upper() not in {"DUENO", "OPERADOR"}:
+            QMessageBox.warning(
+                self,
+                "Administracion",
+                "Tu usuario no tiene permisos para abrir Cierre de caja.",
+            )
+            return
         dlg = CajaDiariaDialog(self)
         dlg.exec()
 
@@ -11223,9 +11981,17 @@ class VentanaPrincipal(QMainWindow):
         dlg.exec()
 
     def _abrir_configuracion(self):
+        if (self.rol or "").strip().upper() not in {"DUENO", "OPERADOR"}:
+            QMessageBox.warning(
+                self,
+                "Administracion",
+                "Tu usuario no tiene permisos para abrir Configuracion.",
+            )
+            return
         dlg = ConfiguracionDialog(self, rol=self.rol)
         if dlg.exec() == QDialog.Accepted:
             self._aplicar_preferencias_ui()
+            self._actualizar_tipos_estacionamiento_ui()
         self._programar_popup_primeros_pasos()
 
     def _ejecutar_tests(self):
@@ -11667,9 +12433,6 @@ class VentanaPrincipal(QMainWindow):
         if hasattr(self.ui, "est_form_layout") and not hasattr(self.ui, "combo_tipo_vehiculo_est"):
             self.ui.label_est_tipo_vehiculo = QLabel("Tipo vehiculo", self.ui.group_est_registro)
             self.ui.combo_tipo_vehiculo_est = QComboBox(self.ui.group_est_registro)
-            self.ui.combo_tipo_vehiculo_est.addItem("Auto", "AUTO")
-            self.ui.combo_tipo_vehiculo_est.addItem("Moto", "MOTO")
-            self.ui.combo_tipo_vehiculo_est.addItem("Camioneta", "CAMIONETA")
             self.ui.est_form_layout.insertRow(
                 2,
                 self.ui.label_est_tipo_vehiculo,
@@ -11723,16 +12486,48 @@ class VentanaPrincipal(QMainWindow):
         table.customContextMenuRequested.connect(self._menu_contextual_est_activos)
         table.cellClicked.connect(self._cargar_datos_tabla_est_activos)
         self.ui.card_est_hora.setVisible(False)
+        self._actualizar_tipos_estacionamiento_ui()
         self._actualizar_activos_est()
         self._est_timer = QTimer(self)
         self._est_timer.timeout.connect(self._actualizar_activos_est)
         self._est_timer.start(5000)
 
+    def _actualizar_tipos_estacionamiento_ui(self):
+        combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
+        if combo is None:
+            return
+        tipos = _tipos_vehiculo_config_estacionamiento()
+        actual = _normalizar_tipo_vehiculo(combo.currentData() or combo.currentText())
+        combo.blockSignals(True)
+        combo.clear()
+        for texto, codigo in tipos:
+            combo.addItem(texto, codigo)
+        combo.setEnabled(bool(tipos))
+        if tipos:
+            idx = combo.findData(actual)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.setToolTip("")
+        else:
+            combo.setToolTip(
+                "No hay tipos de vehiculo habilitados en Configuracion > Sistema."
+            )
+        combo.blockSignals(False)
+        if hasattr(self.ui, "btn_ingreso_est"):
+            self.ui.btn_ingreso_est.setEnabled(bool(tipos))
+            self.ui.btn_ingreso_est.setToolTip(
+                ""
+                if tipos
+                else "No hay tipos de vehiculo habilitados para estacionamiento."
+            )
+
     def _tipo_vehiculo_est_db(self):
         combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
         if combo is None:
-            return "AUTO"
-        return _normalizar_tipo_vehiculo(combo.currentData() or combo.currentText())
+            return ""
+        valor = combo.currentData() or combo.currentText()
+        if not str(valor or "").strip():
+            return ""
+        return _normalizar_tipo_vehiculo(valor)
 
     def _configurar_tabla_est_activos(self):
         table = self.ui.table_est_activos
@@ -11820,12 +12615,27 @@ class VentanaPrincipal(QMainWindow):
         table = self.ui.table_est_activos
         table.clearContents()
         total = len(filas)
+        if total <= 0:
+            table.setRowCount(1)
+            texto_filtro = ""
+            if hasattr(self, "_input_filtro_est_activos"):
+                texto_filtro = self._input_filtro_est_activos.text().strip()
+            mensaje = (
+                "No hay vehiculos activos que coincidan con el filtro actual."
+                if texto_filtro
+                else "No hay vehiculos activos en este momento."
+            )
+            item = QTableWidgetItem(mensaje)
+            item.setFlags(Qt.NoItemFlags)
+            table.setSpan(0, 0, 1, table.columnCount())
+            table.setItem(0, 0, item)
+            return
         filas_por_col = (total + 1) // 2
         table.setRowCount(filas_por_col)
         for idx, row in enumerate(filas):
             col_offset = 0 if idx < filas_por_col else 3
             r = idx if idx < filas_por_col else idx - filas_por_col
-            patente_mostrar = _formatear_patente(row["patente"])
+            patente_mostrar = _formatear_patente_estacionamiento(row["patente"])
             items = [
                 QTableWidgetItem(patente_mostrar),
                 QTableWidgetItem(row["codigo"]),
@@ -11855,7 +12665,20 @@ class VentanaPrincipal(QMainWindow):
         texto = self.ui.input_patente_est.text()
         if not texto:
             return
-        self.ui.input_patente_est.setText(_formatear_patente(texto))
+        patente_fmt = _formatear_patente_estacionamiento(texto)
+        self.ui.input_patente_est.setText(patente_fmt)
+        if _patente_est_es_moto(texto):
+            combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
+            if _tipo_vehiculo_habilitado_estacionamiento("MOTO"):
+                if combo is not None:
+                    idx = combo.findData("MOTO")
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+            else:
+                self._log_estacionamiento(
+                    "El tipo Moto no esta habilitado para estacionamiento.\nRevisalo en Configuracion > Sistema.",
+                    "warn",
+                )
 
     def _espacio_desde_tabla_est(self, row, column):
         table = self.ui.table_est_activos
@@ -11904,14 +12727,14 @@ class VentanaPrincipal(QMainWindow):
             cur = conn.cursor()
             row = self._buscar_movimiento_activo_por_patente(cur, patente)
             if not row:
-                return None, _formatear_patente(patente), ""
+                return None, _formatear_patente_estacionamiento(patente), ""
             return (
                 int(row["id_movimiento"] or 0) or None,
-                _formatear_patente(patente),
+                _formatear_patente_estacionamiento(patente),
                 (row["codigo"] or "").strip().upper(),
             )
         except sqlite3.Error:
-            return None, _formatear_patente(patente), ""
+            return None, _formatear_patente_estacionamiento(patente), ""
         finally:
             if conn:
                 conn.close()
@@ -12421,35 +13244,46 @@ class VentanaPrincipal(QMainWindow):
             {
                 "titulo": "Tarifas",
                 "completo": estado["tarifas"] > 0,
-                "detalle": "Carga al menos una tarifa activa para que la app pueda calcular cobros.",
+                "detalle": (
+                    "Abre Administracion > Tarifas y carga al menos una tarifa activa. "
+                    "Sin este paso la app no puede calcular cobros de cochera ni estacionamiento."
+                ),
             },
             {
                 "titulo": "Configuracion",
                 "completo": config_completa,
                 "detalle": (
-                    "Completa los datos del negocio en Configuracion."
+                    "Abre Configuracion > General y completa los datos del negocio."
                     if not faltantes_config
-                    else "Completa en Configuracion: " + ", ".join(faltantes_config) + "."
+                    else "Abre Configuracion > General y completa: "
+                    + ", ".join(faltantes_config)
+                    + "."
                 ),
             },
             {
                 "titulo": "Carpetas de archivos",
                 "completo": carpetas_completas,
                 "detalle": (
-                    "Define en Configuracion > Reportes las carpetas donde se guardaran reportes, comprobantes y tickets."
+                    "Abre Configuracion > Reportes y define las carpetas donde se guardaran reportes, comprobantes y tickets."
                     if faltantes_carpetas
-                    else "Las carpetas de reportes, comprobantes y tickets ya estan definidas."
+                    else "Las carpetas de reportes, comprobantes y tickets ya estan definidas en Configuracion > Reportes."
                 ),
             },
             {
                 "titulo": "Mapa y espacios",
                 "completo": estado["espacios"] > 0,
-                "detalle": "Crea el mapa y define al menos un espacio disponible antes de usar contratos o estacionamiento.",
+                "detalle": (
+                    "En Cochera > Acciones > Mapa de cocheras crea el mapa y agrega al menos un espacio. "
+                    "Primero define cuales seran cocheras y cuales seran lugares de estacionamiento."
+                ),
             },
             {
                 "titulo": "Clientes y patentes",
                 "completo": clientes_patentes_completo,
-                "detalle": detalle_clientes,
+                "detalle": (
+                    detalle_clientes
+                    + " Esto se hace desde Cochera > Clientes (F6), donde cargas datos del cliente, telefono y patentes."
+                ),
             },
             {
                 "titulo": "Puesta en marcha",
@@ -12457,7 +13291,7 @@ class VentanaPrincipal(QMainWindow):
                 "detalle": (
                     "Ya puedes operar normalmente."
                     if primera_operacion_completa
-                    else "Como siguiente paso, crea el primer contrato o registra el primer ingreso en estacionamiento."
+                    else "Como siguiente paso, entra a Cochera > Contratos (F7) para crear el primer contrato o entra a Estacionamiento para registrar el primer ingreso."
                 ),
             },
         ]
@@ -12529,24 +13363,28 @@ class VentanaPrincipal(QMainWindow):
         self._programar_popup_primeros_pasos()
 
     def _get_tarifa_hora(self, tipo_vehiculo="AUTO"):
+        _, tarifa = self._get_tarifa_hora_info(tipo_vehiculo)
+        return tarifa
+
+    def _get_tarifa_hora_info(self, tipo_vehiculo="AUTO"):
         conn = None
         try:
             conn = get_connection()
             cur = conn.cursor()
             cur.execute(
-                "SELECT precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
+                "SELECT id_tarifa, precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
                 "FROM tarifas WHERE activa = 1 "
                 "ORDER BY fecha_desde DESC LIMIT 1"
             )
             row = cur.fetchone()
             if row:
-                return _tarifa_hora_desde_row(row, tipo_vehiculo)
+                return int(row["id_tarifa"]), _tarifa_hora_desde_row(row, tipo_vehiculo)
         except sqlite3.Error:
-            return None
+            return None, None
         finally:
             if conn:
                 conn.close()
-        return None
+        return None, None
 
     def _buscar_espacio_libre_est(self, cur):
         cur.execute(
@@ -12603,7 +13441,8 @@ class VentanaPrincipal(QMainWindow):
 
     def _buscar_movimiento_activo_por_patente(self, cur, patente):
         cur.execute(
-            "SELECT m.id_movimiento, m.fecha_ingreso, e.codigo, "
+            "SELECT m.id_movimiento, m.fecha_ingreso, m.id_tarifa_aplicada, "
+            "m.tarifa_hora_aplicada, e.codigo, "
             "COALESCE(NULLIF(TRIM(m.tipo_vehiculo), ''), 'AUTO') AS tipo_vehiculo "
             "FROM movimientos m "
             "JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
@@ -12616,16 +13455,37 @@ class VentanaPrincipal(QMainWindow):
 
     def _registrar_ingreso_est(self, popup_parent=None):
         patente = _normalizar_patente(self.ui.input_patente_est.text())
-        patente_fmt = _formatear_patente(patente)
+        patente_fmt = _formatear_patente_estacionamiento(patente)
         self.ui.input_patente_est.setText(patente_fmt)
         codigo = self.ui.input_espacio_est.text().strip().upper()
         tipo_vehiculo = self._tipo_vehiculo_est_db()
+        if _patente_est_es_moto(patente):
+            tipo_vehiculo = "MOTO"
+            combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
+            if combo is not None:
+                idx = combo.findData("MOTO")
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        if not tipo_vehiculo:
+            self._log_estacionamiento(
+                "No hay tipos de vehiculo habilitados para estacionamiento.\nActivalos en Configuracion > Sistema.",
+                "warn",
+                popup_parent=popup_parent,
+            )
+            return
+        if not _tipo_vehiculo_habilitado_estacionamiento(tipo_vehiculo):
+            self._log_estacionamiento(
+                f"El tipo {_texto_tipo_vehiculo(tipo_vehiculo)} no esta habilitado para estacionamiento.\nRevisalo en Configuracion > Sistema.",
+                "warn",
+                popup_parent=popup_parent,
+            )
+            return
         if not patente:
             self._log_estacionamiento("Completa la patente.", "warn", popup_parent=popup_parent)
             return
-        if not _patente_formato_valido(patente):
+        if not _patente_est_formato_valido(patente):
             self._log_estacionamiento(
-                "Patente invalida. Formatos validos: AA 123 AA o AAA 123.",
+                "Patente invalida. Formatos validos: AA 123 AA, AAA 123 o 123 ABC.",
                 "warn",
                 popup_parent=popup_parent,
             )
@@ -12669,7 +13529,7 @@ class VentanaPrincipal(QMainWindow):
                 codigo = codigo_resuelto
                 self.ui.input_espacio_est.setText(codigo)
 
-            tarifa = self._get_tarifa_hora(tipo_vehiculo)
+            tarifa_id, tarifa = self._get_tarifa_hora_info(tipo_vehiculo)
             if tarifa is None:
                 self._log_estacionamiento(
                     f"No hay tarifa por hora definida para {_texto_tipo_vehiculo(tipo_vehiculo)}.",
@@ -12693,9 +13553,11 @@ class VentanaPrincipal(QMainWindow):
             dt_ing = datetime.now()
             ingreso_db = dt_ing.strftime("%Y-%m-%d %H:%M:%S")
             cur.execute(
-                "INSERT INTO movimientos (id_vehiculo, id_espacio, fecha_ingreso, tipo_vehiculo) "
-                "VALUES (?, ?, ?, ?)",
-                (id_vehiculo, id_espacio, ingreso_db, tipo_vehiculo),
+                "INSERT INTO movimientos ("
+                "id_vehiculo, id_espacio, fecha_ingreso, tipo_vehiculo, "
+                "id_tarifa_aplicada, tarifa_hora_aplicada"
+                ") VALUES (?, ?, ?, ?, ?, ?)",
+                (id_vehiculo, id_espacio, ingreso_db, tipo_vehiculo, tarifa_id, tarifa),
             )
             movimiento_id = cur.lastrowid
             conn.commit()
@@ -12753,14 +13615,14 @@ class VentanaPrincipal(QMainWindow):
 
     def _registrar_salida_est(self, popup_parent=None):
         patente = _normalizar_patente(self.ui.input_patente_est.text())
-        patente_fmt = _formatear_patente(patente)
+        patente_fmt = _formatear_patente_estacionamiento(patente)
         self.ui.input_patente_est.setText(patente_fmt)
         if not patente:
             self._log_estacionamiento("Completa la patente.", "warn", popup_parent=popup_parent)
             return
-        if not _patente_formato_valido(patente):
+        if not _patente_est_formato_valido(patente):
             self._log_estacionamiento(
-                "Patente invalida. Formatos validos: AA 123 AA o AAA 123.",
+                "Patente invalida. Formatos validos: AA 123 AA, AAA 123 o 123 ABC.",
                 "warn",
                 popup_parent=popup_parent,
             )
@@ -12784,7 +13646,9 @@ class VentanaPrincipal(QMainWindow):
                 return
 
             tipo_vehiculo = _normalizar_tipo_vehiculo(row["tipo_vehiculo"])
-            tarifa = self._get_tarifa_hora(tipo_vehiculo)
+            tarifa = float(row["tarifa_hora_aplicada"] or 0.0)
+            if tarifa <= 0:
+                _tarifa_id, tarifa = self._get_tarifa_hora_info(tipo_vehiculo)
             if tarifa is None:
                 self._log_estacionamiento(
                     f"No hay tarifa por hora definida para {_texto_tipo_vehiculo(tipo_vehiculo)}.",
@@ -12806,6 +13670,29 @@ class VentanaPrincipal(QMainWindow):
                 tolerancia_min=15,
             )
 
+            ingreso_txt = dt_ing.strftime("%d/%m/%Y %H:%M:%S")
+            salida_txt = dt_out.strftime("%d/%m/%Y %H:%M:%S")
+            texto_confirmacion = (
+                f"Patente: {patente_fmt}\n"
+                f"Espacio: {row['codigo']}\n"
+                f"Tipo: {_texto_tipo_vehiculo(tipo_vehiculo)}\n"
+                f"Ingreso: {ingreso_txt}\n"
+                f"Salida: {salida_txt}\n"
+                f"Horas cobradas: {horas_cobradas}\n"
+                f"Metodo: {metodo}\n"
+                f"Precio: {_fmt_money(total)}\n\n"
+                "Aceptar esta salida?"
+            )
+            confirmar = QMessageBox.question(
+                popup_parent or self,
+                "Confirmar salida",
+                texto_confirmacion,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if confirmar != QMessageBox.Yes:
+                return
+
             cur.execute(
                 "UPDATE movimientos SET fecha_salida = ?, total = ? "
                 "WHERE id_movimiento = ?",
@@ -12816,8 +13703,6 @@ class VentanaPrincipal(QMainWindow):
                 (row["id_movimiento"], total, metodo),
             )
             conn.commit()
-            ingreso_txt = dt_ing.strftime("%d/%m/%Y %H:%M:%S")
-            salida_txt = dt_out.strftime("%d/%m/%Y %H:%M:%S")
             ticket, ticket_error = _emitir_ticket_estacionamiento_seguro(
                 evento="Salida",
                 patente=patente_fmt,
@@ -12838,7 +13723,7 @@ class VentanaPrincipal(QMainWindow):
                 mostrar_popup=False,
             )
             box = QMessageBox(popup_parent or self)
-            box.setWindowTitle("Detalle de salida")
+            box.setWindowTitle("Salida registrada")
             box.setIcon(QMessageBox.Information)
             texto = (
                 f"Patente: {patente_fmt}\n"
@@ -12850,8 +13735,6 @@ class VentanaPrincipal(QMainWindow):
                 f"Metodo: {metodo}\n"
                 f"Precio: {_fmt_money(total)}"
             )
-            btn_abrir = None
-            btn_vuelto = None
             if ticket:
                 texto += f"\nTicket: {Path(ticket).name}"
                 btn_abrir = box.addButton("Abrir ticket", QMessageBox.ActionRole)
@@ -12883,7 +13766,6 @@ class VentanaPrincipal(QMainWindow):
             if conn:
                 conn.close()
             _antirebote_finalizar(self, "est_salida", cooldown_ms=700)
-
     def _actualizar_activos_est(self):
         self.ui.table_est_activos.setRowCount(0)
         conn = None

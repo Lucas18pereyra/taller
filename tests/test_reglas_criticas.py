@@ -216,6 +216,59 @@ class ExclusividadPatenteTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def test_movimiento_conserva_tarifa_aplicada_tras_cambio_de_tarifa(self):
+        id_cliente = self._crear_cliente(dni="40111224")
+        id_espacio = self._crear_espacio("E14", reservado=0)
+        id_vehiculo = self._crear_vehiculo("FFF777", id_cliente=id_cliente)
+
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE tarifas SET activa = 0 WHERE activa = 1")
+        cur.execute(
+            "INSERT INTO tarifas (precio_hora, precio_hora_auto, activa) VALUES (?, ?, 1)",
+            (1000, 1000),
+        )
+        tarifa_inicial_id = cur.lastrowid
+        cur.execute(
+            "INSERT INTO movimientos ("
+            "id_vehiculo, id_espacio, fecha_ingreso, tipo_vehiculo, "
+            "id_tarifa_aplicada, tarifa_hora_aplicada"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                id_vehiculo,
+                id_espacio,
+                "2026-02-13 10:00:00",
+                "AUTO",
+                tarifa_inicial_id,
+                1000.0,
+            ),
+        )
+        mov_id = cur.lastrowid
+        cur.execute("UPDATE tarifas SET activa = 0 WHERE id_tarifa = ?", (tarifa_inicial_id,))
+        cur.execute(
+            "INSERT INTO tarifas (precio_hora, precio_hora_auto, activa) VALUES (?, ?, 1)",
+            (2000, 2000),
+        )
+        conn.commit()
+
+        cur.execute(
+            "SELECT id_tarifa_aplicada, tarifa_hora_aplicada FROM movimientos WHERE id_movimiento = ?",
+            (mov_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        self.assertEqual(int(row["id_tarifa_aplicada"] or 0), tarifa_inicial_id)
+        self.assertEqual(float(row["tarifa_hora_aplicada"] or 0.0), 1000.0)
+
+        horas, total = calcular_total_estadia(
+            datetime(2026, 2, 13, 10, 0, 0),
+            datetime(2026, 2, 13, 11, 16, 0),
+            float(row["tarifa_hora_aplicada"]),
+        )
+        self.assertEqual(horas, 2)
+        self.assertEqual(total, 2000.0)
+
 
 class ContratosPagoTests(unittest.TestCase):
     def setUp(self):
@@ -835,6 +888,29 @@ class FlujosIntegracionTests(unittest.TestCase):
         self.assertEqual(app_main._tarifa_hora_desde_row(row, "AUTO"), 1000.0)
         self.assertEqual(app_main._tarifa_hora_desde_row(row, "MOTO"), 600.0)
         self.assertEqual(app_main._tarifa_hora_desde_row(row, "CAMIONETA"), 1500.0)
+
+    def test_recordatorio_whatsapp_usa_tarifa_mensual_vigente(self):
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE tarifas SET activa = 0 WHERE activa = 1")
+        cur.execute(
+            "INSERT INTO tarifas ("
+            "precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta, "
+            "precio_mensual, precio_mensual_auto, precio_mensual_camioneta, activa"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+            (1000, 1000, 600, 1500, 10000, 12000, 18000),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(
+            app_main._texto_cuota_recordatorio("AUTO", 10000),
+            "$ 12.000,00",
+        )
+        self.assertEqual(
+            app_main._texto_cuota_recordatorio("CAMIONETA", 10000),
+            "$ 18.000,00",
+        )
 
     def test_whatsapp_admite_variable_cuota_en_plantilla(self):
         conn = get_connection()
