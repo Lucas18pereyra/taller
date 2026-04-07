@@ -1,5 +1,4 @@
-﻿
-import sys
+﻿import sys
 import os
 import sqlite3
 import subprocess
@@ -572,6 +571,21 @@ def _solo_digitos(texto):
     return "".join(ch for ch in str(texto or "") if ch.isdigit())
 
 
+def _usuario_longitud_valida(texto):
+    cantidad = len((texto or "").strip())
+    return 3 <= cantidad <= 16
+
+
+def _password_longitud_valida(texto):
+    cantidad = len(texto or "")
+    return 6 <= cantidad <= 16
+
+
+def _dni_longitud_valida(texto):
+    cantidad = len(_solo_digitos(texto))
+    return 6 < cantidad < 9
+
+
 def _formatear_documento(texto):
     digitos = _solo_digitos(texto)
     if not digitos:
@@ -591,6 +605,7 @@ def _normalizar_patente(texto):
 
 def _formatear_patente(texto):
     patente = _normalizar_patente(texto)
+    # Aca meto el espacio solo cuando el formato ya cierra, asi no inventamos una patente rara.
     if re.fullmatch(r"[A-Z]{2}\d{3}[A-Z]{2}", patente):
         return f"{patente[:2]} {patente[2:5]} {patente[5:]}"
     if re.fullmatch(r"[A-Z]{3}\d{3}", patente):
@@ -661,14 +676,26 @@ def _telefono_a_whatsapp(telefono):
 def _plantilla_whatsapp_default():
     return (
         "Hola {nombre}, te recordamos tu vencimiento de cochera ({vencimiento}). "
-        "Patente: {patente}. Nueva cuota: {deuda}.{modelo_extra}"
+        "Patente: {patente}. Nueva cuota: {deuda}."
     )
 
 
-def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
-    plantilla = (_config_get("wa_recordatorio_template", _plantilla_whatsapp_default()) or "").strip()
+def _sanitizar_template_whatsapp(texto):
+    plantilla = str(texto or "").strip()
     if not plantilla:
-        plantilla = _plantilla_whatsapp_default()
+        return _plantilla_whatsapp_default()
+    plantilla = plantilla.replace("{modelo_extra}", "")
+    plantilla = plantilla.replace("{patente_extra}", "")
+    plantilla = re.sub(r"[ \t]{2,}", " ", plantilla)
+    plantilla = re.sub(r" +([.,;:])", r"\1", plantilla)
+    plantilla = re.sub(r"\n{3,}", "\n\n", plantilla)
+    return plantilla.strip() or _plantilla_whatsapp_default()
+
+
+def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
+    plantilla = _sanitizar_template_whatsapp(
+        _config_get("wa_recordatorio_template", _plantilla_whatsapp_default())
+    )
     nombre_txt = (nombre or "").strip() or "cliente"
     venc_txt = (vencimiento or "").strip() or "sin vencimiento"
     deuda_txt = (deuda or "").strip() or "$ 0.00"
@@ -865,7 +892,60 @@ def _tema_claro_activo():
     return (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower() == "claro"
 
 
+def _ui_tamano_texto():
+    valor = (_config_get("ui_tamano_texto", "grande") or "grande").strip().lower()
+    alias = {
+        "normal": "normal",
+        "grande": "grande",
+        "muy grande": "muy_grande",
+        "muy_grande": "muy_grande",
+    }
+    return alias.get(valor, "grande")
+
+
+def _ui_factor_escala():
+    return {
+        "normal": 1.0,
+        "grande": 1.2,
+        "muy_grande": 1.35,
+    }.get(_ui_tamano_texto(), 1.2)
+
+
+def _ui_escalar_pt(valor, minimo=1):
+    try:
+        numero = float(valor or 0)
+    except (TypeError, ValueError):
+        return max(int(minimo or 1), 1)
+    return max(int(minimo or 1), int(round(numero * _ui_factor_escala())))
+
+
+def _ui_escalar_px(valor, minimo=1):
+    return _ui_escalar_pt(valor, minimo=minimo)
+
+
+def _aplicar_fuente_aplicacion(app=None):
+    app = app or QApplication.instance()
+    if app is None:
+        return
+    base = getattr(app, "_base_font_ui", None)
+    if base is None:
+        base = QFont(app.font())
+        app._base_font_ui = QFont(base)
+    font = QFont(base)
+    factor = _ui_factor_escala()
+    if font.pointSizeF() > 0:
+        font.setPointSizeF(max(8.0, float(font.pointSizeF()) * factor))
+    elif font.pointSize() > 0:
+        font.setPointSize(max(8, int(round(float(font.pointSize()) * factor))))
+    elif font.pixelSize() > 0:
+        font.setPixelSize(max(10, int(round(float(font.pixelSize()) * factor))))
+    else:
+        font.setPointSize(max(10, _ui_escalar_pt(10, minimo=10)))
+    app.setFont(font)
+
+
 def _estilo_modo_sencillo():
+    info_font_px = _ui_escalar_px(12, minimo=12)
     if _tema_claro_activo():
         return """
             QDialog {
@@ -880,7 +960,15 @@ def _estilo_modo_sencillo():
             }
             QLabel#modo_sencillo_info {
                 color: #475569;
-                font-size: 12px;
+                font-size: __INFO_FONT__px;
+            }
+            QLabel#modo_sencillo_fecha_hora {
+                color: #0f4c5c;
+                background-color: rgba(255, 255, 255, 0.75);
+                border: 1px solid #d9e2ec;
+                border-radius: 10px;
+                padding: 6px 12px;
+                font-weight: 700;
             }
             QLabel#modo_sencillo_estado {
                 background-color: rgba(255, 255, 255, 0.92);
@@ -965,7 +1053,7 @@ def _estilo_modo_sencillo():
             QPushButton[variant="neutral"]:hover {
                 background-color: #dbe4ef;
             }
-        """
+        """.replace("__INFO_FONT__", str(info_font_px))
     return """
         QDialog {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -979,7 +1067,15 @@ def _estilo_modo_sencillo():
         }
         QLabel#modo_sencillo_info {
             color: #9fb0c3;
-            font-size: 12px;
+            font-size: __INFO_FONT__px;
+        }
+        QLabel#modo_sencillo_fecha_hora {
+            color: #dbeafe;
+            background-color: rgba(27, 36, 48, 0.82);
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 6px 12px;
+            font-weight: 700;
         }
         QLabel#modo_sencillo_estado {
             background-color: rgba(27, 36, 48, 0.92);
@@ -1064,7 +1160,7 @@ def _estilo_modo_sencillo():
         QPushButton[variant="neutral"]:hover {
             background-color: #4B5968;
         }
-    """
+    """.replace("__INFO_FONT__", str(info_font_px))
 
 
 def _tipos_vehiculo_config_estacionamiento():
@@ -2021,10 +2117,15 @@ class FirstUserDialog(QDialog):
 
         form = QFormLayout()
         self.input_usuario = QLineEdit()
+        self.input_usuario.setMaxLength(16)
+        self.input_usuario.setToolTip("El usuario debe tener entre 3 y 16 caracteres.")
         self.input_password = QLineEdit()
         self.input_password.setEchoMode(QLineEdit.Password)
+        self.input_password.setMaxLength(16)
+        self.input_password.setToolTip("La contrasena debe tener entre 6 y 16 caracteres.")
         self.input_password2 = QLineEdit()
         self.input_password2.setEchoMode(QLineEdit.Password)
+        self.input_password2.setMaxLength(16)
         form.addRow("Usuario", self.input_usuario)
         form.addRow("Contrasena", self.input_password)
         form.addRow("Repetir contrasena", self.input_password2)
@@ -2061,11 +2162,25 @@ class FirstUserDialog(QDialog):
                 "Completa el nombre de usuario del administrador.",
             )
             return
+        if not _usuario_longitud_valida(usuario):
+            QMessageBox.warning(
+                self,
+                "Usuario",
+                "El nombre de usuario debe tener entre 3 y 16 caracteres.",
+            )
+            return
         if not password:
             QMessageBox.warning(
                 self,
                 "Datos incompletos",
                 "Completa la contrasena del administrador.",
+            )
+            return
+        if not _password_longitud_valida(password):
+            QMessageBox.warning(
+                self,
+                "Contrasena",
+                "La contrasena debe tener entre 6 y 16 caracteres.",
             )
             return
         if not password2:
@@ -2134,10 +2249,15 @@ class UsuariosDialog(QDialog):
         panel_form = QVBoxLayout()
         form = QFormLayout()
         self.input_usuario = QLineEdit()
+        self.input_usuario.setMaxLength(16)
+        self.input_usuario.setToolTip("El usuario debe tener entre 3 y 16 caracteres.")
         self.input_password = QLineEdit()
         self.input_password.setEchoMode(QLineEdit.Password)
+        self.input_password.setMaxLength(16)
+        self.input_password.setToolTip("La contrasena debe tener entre 6 y 16 caracteres.")
         self.input_password2 = QLineEdit()
         self.input_password2.setEchoMode(QLineEdit.Password)
+        self.input_password2.setMaxLength(16)
         form.addRow("Usuario", self.input_usuario)
         form.addRow("Contrasena", self.input_password)
         form.addRow("Repetir contrasena", self.input_password2)
@@ -2151,8 +2271,11 @@ class UsuariosDialog(QDialog):
         form_pass = QFormLayout()
         self.input_new_password = QLineEdit()
         self.input_new_password.setEchoMode(QLineEdit.Password)
+        self.input_new_password.setMaxLength(16)
+        self.input_new_password.setToolTip("La contrasena debe tener entre 6 y 16 caracteres.")
         self.input_new_password2 = QLineEdit()
         self.input_new_password2.setEchoMode(QLineEdit.Password)
+        self.input_new_password2.setMaxLength(16)
         form_pass.addRow("Nueva contrasena", self.input_new_password)
         form_pass.addRow("Repetir contrasena", self.input_new_password2)
         panel_form.addLayout(form_pass)
@@ -2216,11 +2339,25 @@ class UsuariosDialog(QDialog):
                 "Completa el nombre de usuario del operador.",
             )
             return False
+        if not _usuario_longitud_valida(usuario):
+            QMessageBox.warning(
+                self,
+                "Usuario",
+                "El nombre de usuario debe tener entre 3 y 16 caracteres.",
+            )
+            return False
         if not password:
             QMessageBox.warning(
                 self,
                 "Datos incompletos",
                 "Completa la contrasena del operador.",
+            )
+            return False
+        if not _password_longitud_valida(password):
+            QMessageBox.warning(
+                self,
+                "Contrasena",
+                "La contrasena debe tener entre 6 y 16 caracteres.",
             )
             return False
         if not password2:
@@ -2316,6 +2453,13 @@ class UsuariosDialog(QDialog):
         password2 = self.input_new_password2.text()
         if not password:
             QMessageBox.warning(self, "Contrasena", "Completa la nueva contrasena.")
+            return False
+        if not _password_longitud_valida(password):
+            QMessageBox.warning(
+                self,
+                "Contrasena",
+                "La contrasena debe tener entre 6 y 16 caracteres.",
+            )
             return False
         if not password2:
             QMessageBox.warning(
@@ -2615,7 +2759,7 @@ class HistorialPagosContratoDialog(QDialog):
 
 
 class IngresoRapidoEstDialog(QDialog):
-    def __init__(self, tipos_disponibles, metodos_disponibles, parent=None):
+    def __init__(self, tipos_disponibles, parent=None):
         super().__init__(parent)
         self._atajos = []
         self.setWindowTitle("Modo sencillo - Ingreso")
@@ -2627,7 +2771,7 @@ class IngresoRapidoEstDialog(QDialog):
         titulo = QLabel("Ingreso rapido")
         titulo.setObjectName("modo_sencillo_titulo")
         titulo_font = QFont()
-        titulo_font.setPointSize(16)
+        titulo_font.setPointSize(_ui_escalar_pt(16, minimo=16))
         titulo_font.setBold(True)
         titulo.setFont(titulo_font)
         titulo.setAlignment(Qt.AlignCenter)
@@ -2654,29 +2798,25 @@ class IngresoRapidoEstDialog(QDialog):
         self.input_espacio = QLineEdit()
         self.input_espacio.setPlaceholderText("Automatico si lo dejas vacio")
         self.combo_tipo = QComboBox()
+        self.combo_tipo.addItem("Seleccionar tipo...", "")
         for texto, valor in tipos_disponibles or [("Auto", "AUTO")]:
             self.combo_tipo.addItem(texto, valor)
-        self.combo_metodo = QComboBox()
-        for metodo in metodos_disponibles or ["Efectivo"]:
-            self.combo_metodo.addItem(metodo)
+        self.combo_tipo.setCurrentIndex(0)
         for widget in (
             self.input_patente,
             self.input_espacio,
             self.combo_tipo,
-            self.combo_metodo,
         ):
             widget.setMinimumHeight(40)
         label_patente = QLabel("Patente (F4)")
         label_patente.setBuddy(self.input_patente)
         label_espacio = QLabel("Espacio (opcional)")
         label_tipo = QLabel("Tipo vehiculo")
-        label_metodo = QLabel("Metodo pago")
-        for label in (label_patente, label_espacio, label_tipo, label_metodo):
+        for label in (label_patente, label_espacio, label_tipo):
             label.setObjectName("modo_sencillo_label")
         form.addRow(label_patente, self.input_patente)
         form.addRow(label_espacio, self.input_espacio)
         form.addRow(label_tipo, self.combo_tipo)
-        form.addRow(label_metodo, self.combo_metodo)
         layout.addLayout(form)
 
         botones = QHBoxLayout()
@@ -2701,8 +2841,7 @@ class IngresoRapidoEstDialog(QDialog):
             {
                 self.input_patente: self.input_espacio,
                 self.input_espacio: self.combo_tipo,
-                self.combo_tipo: self.combo_metodo,
-                self.combo_metodo: self.accept,
+                self.combo_tipo: self.accept,
             },
         )
         self._crear_atajos()
@@ -2717,6 +2856,14 @@ class IngresoRapidoEstDialog(QDialog):
         self.input_patente.setFocus()
         self.input_patente.selectAll()
 
+    def _tipo_vehiculo_seleccionado(self):
+        valor = self.combo_tipo.currentData()
+        if valor is None:
+            valor = self.combo_tipo.currentText()
+        if not str(valor or "").strip():
+            return ""
+        return _normalizar_tipo_vehiculo(valor)
+
     def accept(self):
         patente = _normalizar_patente(self.input_patente.text())
         if not patente:
@@ -2727,6 +2874,14 @@ class IngresoRapidoEstDialog(QDialog):
             )
             self.input_patente.setFocus()
             return
+        if not self._tipo_vehiculo_seleccionado():
+            QMessageBox.warning(
+                self,
+                "Ingreso rapido",
+                "Selecciona un tipo de vehiculo antes de registrar el ingreso.",
+            )
+            self.combo_tipo.setFocus()
+            return
         self.input_patente.setText(_formatear_patente(patente))
         super().accept()
 
@@ -2734,8 +2889,7 @@ class IngresoRapidoEstDialog(QDialog):
         return {
             "patente": self.input_patente.text().strip(),
             "espacio": self.input_espacio.text().strip().upper(),
-            "tipo_vehiculo": self.combo_tipo.currentData() or self.combo_tipo.currentText(),
-            "metodo": self.combo_metodo.currentText(),
+            "tipo_vehiculo": self._tipo_vehiculo_seleccionado(),
         }
 
 
@@ -2750,7 +2904,7 @@ class CalcularVueltoDialog(QDialog):
 
         titulo = QLabel("Calcular vuelto")
         fuente = titulo.font()
-        fuente.setPointSize(14)
+        fuente.setPointSize(_ui_escalar_pt(14, minimo=14))
         fuente.setBold(True)
         titulo.setFont(fuente)
         titulo.setAlignment(Qt.AlignCenter)
@@ -2819,7 +2973,7 @@ class CalcularVueltoDialog(QDialog):
 
 
 class ActivosEstacionamientoDialog(QDialog):
-    def __init__(self, filas, permitir_salida=False, parent=None):
+    def __init__(self, filas, permitir_salida=False, metodos_disponibles=None, parent=None):
         super().__init__(parent)
         self._permitir_salida = bool(permitir_salida)
         self._filas_cache = list(filas or [])
@@ -2944,11 +3098,19 @@ class ModoSencilloEstacionamientoDialog(QDialog):
         titulo = QLabel("Modo sencillo - Estacionamiento")
         titulo.setObjectName("modo_sencillo_titulo")
         titulo_font = QFont()
-        titulo_font.setPointSize(18)
+        titulo_font.setPointSize(_ui_escalar_pt(18, minimo=18))
         titulo_font.setBold(True)
         titulo.setFont(titulo_font)
         titulo.setAlignment(Qt.AlignCenter)
         layout.addWidget(titulo)
+
+        self.label_fecha_hora = QLabel("")
+        self.label_fecha_hora.setObjectName("modo_sencillo_fecha_hora")
+        self.label_fecha_hora.setAlignment(Qt.AlignCenter)
+        self.label_fecha_hora.setToolTip(
+            "Fecha y hora actual del equipo usada como referencia en el modo sencillo."
+        )
+        layout.addWidget(self.label_fecha_hora)
 
         self.label_estado = QLabel("")
         self.label_estado.setObjectName("modo_sencillo_estado")
@@ -2981,7 +3143,7 @@ class ModoSencilloEstacionamientoDialog(QDialog):
         )
         for btn in (self.btn_ingreso, self.btn_salida, self.btn_activos, self.btn_cerrar):
             fuente = btn.font()
-            fuente.setPointSize(15)
+            fuente.setPointSize(_ui_escalar_pt(15, minimo=15))
             fuente.setBold(True)
             btn.setFont(fuente)
             btn.setMinimumHeight(92)
@@ -3005,7 +3167,12 @@ class ModoSencilloEstacionamientoDialog(QDialog):
         self.btn_activos.clicked.connect(self._ver_activos)
         self.btn_cerrar.clicked.connect(self.close)
         self._crear_atajos()
+        self._timer_fecha_hora = QTimer(self)
+        self._timer_fecha_hora.setInterval(1000)
+        self._timer_fecha_hora.timeout.connect(self._actualizar_fecha_hora)
+        self._timer_fecha_hora.start()
 
+        self._actualizar_fecha_hora()
         self._refrescar_estado()
 
     def _crear_atajos(self):
@@ -3027,6 +3194,12 @@ class ModoSencilloEstacionamientoDialog(QDialog):
             pass
         return list(getattr(self.ventana, "_activos_est_cache", []) or [])
 
+    def _actualizar_fecha_hora(self):
+        # Esto sale de la hora de la PC, asi en el modo sencillo vemos una referencia real y no algo inventado.
+        actual = QDateTime.currentDateTime()
+        texto = _LOCALE_ES_AR.toString(actual, "dddd dd/MM/yyyy  |  HH:mm:ss")
+        self.label_fecha_hora.setText(texto[:1].upper() + texto[1:] if texto else "")
+
     def _refrescar_estado(self):
         filas = self._filas_activas()
         self.label_estado.setText(
@@ -3047,11 +3220,6 @@ class ModoSencilloEstacionamientoDialog(QDialog):
             idx_tipo = combo_tipo.findData(_normalizar_tipo_vehiculo(data.get("tipo_vehiculo")))
             if idx_tipo >= 0:
                 combo_tipo.setCurrentIndex(idx_tipo)
-        combo_metodo = getattr(self.ventana.ui, "combo_metodo_est", None)
-        if combo_metodo is not None:
-            idx_met = combo_metodo.findText(data.get("metodo") or "", Qt.MatchExactly)
-            if idx_met >= 0:
-                combo_metodo.setCurrentIndex(idx_met)
 
     def _abrir_ingreso(self):
         tipos = _tipos_vehiculo_config_estacionamiento()
@@ -3063,7 +3231,7 @@ class ModoSencilloEstacionamientoDialog(QDialog):
                 "Activalos en Configuracion > Sistema.",
             )
             return
-        dlg = IngresoRapidoEstDialog(tipos, self._metodos_disponibles(), self)
+        dlg = IngresoRapidoEstDialog(tipos, self)
         if dlg.exec() != QDialog.Accepted:
             return
         if not self.ventana._abrir_menu_estacionamiento(popup_parent=self):
@@ -3084,7 +3252,11 @@ class ModoSencilloEstacionamientoDialog(QDialog):
             )
             self._refrescar_estado()
             return
-        dlg = ActivosEstacionamientoDialog(filas, permitir_salida=True, parent=self)
+        dlg = ActivosEstacionamientoDialog(
+            filas,
+            permitir_salida=True,
+            parent=self,
+        )
         if dlg.exec() != QDialog.Accepted:
             self._refrescar_estado()
             return
@@ -3379,6 +3551,7 @@ class ContratosDialog(QDialog):
         if not dni:
             self._cargar_tarifa_mensual()
             return
+        # Esto respeta la patente que ya veniamos usando si el cliente tiene varias, asi no salta a cualquiera.
         vehiculo = svc_obtener_vehiculo_por_dni(dni, self._patente_preferida)
         patente = (vehiculo.get("patente") or "").strip()
         tipo_vehiculo = vehiculo.get("tipo_vehiculo") or "AUTO"
@@ -5815,8 +5988,12 @@ class ClientesDialog(QDialog):
                 "El formulario esta vacio.\nCompleta al menos DNI y nombre antes de guardar.",
             )
             return False
-        if len(dni) != 8:
-            QMessageBox.warning(self, "Datos", "El DNI debe tener exactamente 8 numeros.")
+        if not _dni_longitud_valida(dni):
+            QMessageBox.warning(
+                self,
+                "Datos",
+                "El DNI debe tener 7 u 8 numeros.",
+            )
             return False
         if not nombre:
             QMessageBox.warning(self, "Datos", "El nombre es obligatorio.")
@@ -7885,12 +8062,7 @@ class MapaCocheraDialog(QDialog):
         parent.ui.input_patente_est.setText(patente)
         parent.ui.input_espacio_est.setText((item.codigo or "").strip().upper())
 
-        if hasattr(parent.ui, "combo_metodo_est"):
-            try:
-                parent.ui.combo_metodo_est.setFocus()
-            except Exception:
-                pass
-        elif hasattr(parent.ui, "btn_salida_est"):
+        if hasattr(parent.ui, "btn_salida_est"):
             try:
                 parent.ui.btn_salida_est.setFocus()
             except Exception:
@@ -8381,6 +8553,7 @@ class MapaCocheraDialog(QDialog):
                 codigo = item.codigo
                 pos = item.pos()
                 rect = item.rect()
+                # Si el cuadrado existe en el mapa pero todavia no en espacios, lo doy de alta aca y queda todo parejo.
                 cur.execute(
                     "INSERT OR IGNORE INTO espacios (codigo, es_reservado, activo) "
                     "VALUES (?, 0, 1)",
@@ -9291,6 +9464,7 @@ class ReportesDialog(QDialog):
 
     def _detalle_filtrado(self):
         detalle = list(self._detalle_cache or [])
+        # Primero armamos el lote entero y despues lo achicamos, asi el resumen y la tabla salen del mismo corte.
         tipo = self.combo_tipo.currentText()
         if tipo != "Todos":
             detalle = [r for r in detalle if r["tipo"] == tipo]
@@ -10524,12 +10698,10 @@ class ConfiguracionDialog(QDialog):
             "{deuda}: reemplaza por el valor de la nueva cuota del contrato.\n"
             "{cuota}: alias de {deuda} para usar el nombre mas claro.\n"
             "{patente}: reemplaza por la patente con formato (AA 123 AA o AAA 123).\n"
-            "{patente_extra}: agrega texto de patente solo si hay patente cargada.\n"
             "{modelo}: reemplaza por el modelo del vehiculo asociado (si existe).\n"
-            "{modelo_extra}: agrega texto de modelo solo si hay modelo cargado.\n"
             "Escribilas tal cual, entre llaves.\n"
             "Ejemplo: Hola {nombre}, tu vencimiento es {vencimiento}. "
-            "Patente: {patente}. Nueva cuota: {cuota}.{modelo_extra}"
+            "Patente: {patente}. Nueva cuota: {cuota}."
         )
         ayuda_wa.setObjectName("help_whatsapp")
         ayuda_wa.setWordWrap(True)
@@ -10539,10 +10711,6 @@ class ConfiguracionDialog(QDialog):
 
         tab_reportes = QWidget()
         form_reportes = QFormLayout(tab_reportes)
-        self.input_moneda = QLineEdit()
-        self.input_moneda.setMaxLength(4)
-        self.input_moneda.setPlaceholderText("$")
-        form_reportes.addRow("Simbolo moneda", self.input_moneda)
         self.input_dir_reportes = QLineEdit()
         self.btn_dir_reportes = QPushButton("Elegir...")
         fila_reportes = QHBoxLayout()
@@ -10574,34 +10742,57 @@ class ConfiguracionDialog(QDialog):
         )
         self.combo_tema = QComboBox()
         self.combo_tema.addItems(["Oscuro", "Claro"])
+        self.combo_tamano_texto = QComboBox()
+        self.combo_tamano_texto.addItem("Normal", "normal")
+        self.combo_tamano_texto.addItem("Grande", "grande")
+        self.combo_tamano_texto.addItem("Muy grande", "muy_grande")
+        self.combo_tamano_texto.setToolTip(
+            "Ajusta el tamano general del texto para facilitar la lectura."
+        )
         self.check_coch_auto = QCheckBox("Permitir autos")
         self.check_coch_moto = QCheckBox("Permitir motos")
         self.check_coch_camioneta = QCheckBox("Permitir camionetas")
         tipos_coch = QVBoxLayout()
-        tipos_coch.setContentsMargins(0, 0, 0, 0)
-        tipos_coch.setSpacing(4)
+        tipos_coch.setContentsMargins(10, 8, 10, 10)
+        tipos_coch.setSpacing(6)
         tipos_coch.addWidget(self.check_coch_auto)
         tipos_coch.addWidget(self.check_coch_moto)
         tipos_coch.addWidget(self.check_coch_camioneta)
-        cont_tipos_coch = QWidget()
-        cont_tipos_coch.setLayout(tipos_coch)
+        grupo_tipos_coch = QGroupBox("Cochera")
+        grupo_tipos_coch.setToolTip(
+            "Define que tipos de vehiculos se pueden usar para contratos de cochera."
+        )
+        grupo_tipos_coch.setLayout(tipos_coch)
         self.check_est_auto = QCheckBox("Permitir autos")
         self.check_est_moto = QCheckBox("Permitir motos")
         self.check_est_camioneta = QCheckBox("Permitir camionetas")
         tipos_est = QVBoxLayout()
-        tipos_est.setContentsMargins(0, 0, 0, 0)
-        tipos_est.setSpacing(4)
+        tipos_est.setContentsMargins(10, 8, 10, 10)
+        tipos_est.setSpacing(6)
         tipos_est.addWidget(self.check_est_auto)
         tipos_est.addWidget(self.check_est_moto)
         tipos_est.addWidget(self.check_est_camioneta)
-        cont_tipos_est = QWidget()
-        cont_tipos_est.setLayout(tipos_est)
+        grupo_tipos_est = QGroupBox("Estacionamiento")
+        grupo_tipos_est.setToolTip(
+            "Define que tipos de vehiculos se pueden recibir en estacionamiento."
+        )
+        grupo_tipos_est.setLayout(tipos_est)
+        fila_tipos = QHBoxLayout()
+        fila_tipos.setContentsMargins(0, 0, 0, 0)
+        fila_tipos.setSpacing(12)
+        fila_tipos.addWidget(grupo_tipos_coch, 1)
+        fila_tipos.addWidget(grupo_tipos_est, 1)
+        cont_tipos = QWidget()
+        layout_tipos = QVBoxLayout(cont_tipos)
+        layout_tipos.setContentsMargins(0, 0, 0, 0)
+        layout_tipos.setSpacing(0)
+        layout_tipos.addLayout(fila_tipos)
         self.btn_ultra_rtx = QPushButton("Activar ultra RTX 8K 120 FPS")
         self.btn_ultra_rtx.setProperty("variant", "info")
         form_sistema.addRow("Resolucion", self.combo_resolucion)
         form_sistema.addRow("Tema", self.combo_tema)
-        form_sistema.addRow("Tipos en cochera", cont_tipos_coch)
-        form_sistema.addRow("Tipos en estacionamiento", cont_tipos_est)
+        form_sistema.addRow("Tamano de texto", self.combo_tamano_texto)
+        form_sistema.addRow("Vehiculos permitidos", cont_tipos)
         form_sistema.addRow("Modo gamer", self.btn_ultra_rtx)
         self.tabs.addTab(tab_sistema, "Sistema")
 
@@ -10642,13 +10833,13 @@ class ConfiguracionDialog(QDialog):
                 self.input_direccion: self.input_alias,
                 self.input_alias: self.input_cbu,
                 self.input_cbu: self.btn_guardar,
-                self.input_moneda: self.input_dir_reportes,
                 self.input_dir_reportes: self.input_dir_comprobantes,
                 self.input_dir_comprobantes: self.input_dir_tickets_salida,
                 self.input_dir_tickets_salida: self.btn_carpetas_escritorio,
                 self.btn_carpetas_escritorio: self.btn_guardar,
                 self.combo_resolucion: self.combo_tema,
-                self.combo_tema: self.check_coch_auto,
+                self.combo_tema: self.combo_tamano_texto,
+                self.combo_tamano_texto: self.check_coch_auto,
                 self.check_coch_auto: self.check_coch_moto,
                 self.check_coch_moto: self.check_coch_camioneta,
                 self.check_coch_camioneta: self.check_est_auto,
@@ -10669,12 +10860,12 @@ class ConfiguracionDialog(QDialog):
             self.input_alias.text().strip(),
             self.input_cbu.text().strip(),
             self.input_wa_template.toPlainText().strip(),
-            (self.input_moneda.text() or "$").strip() or "$",
             self.input_dir_reportes.text().strip(),
             self.input_dir_comprobantes.text().strip(),
             self.input_dir_tickets_salida.text().strip(),
             self.combo_resolucion.currentText(),
             self.combo_tema.currentText(),
+            self.combo_tamano_texto.currentData(),
             bool(self.check_coch_auto.isChecked()),
             bool(self.check_coch_moto.isChecked()),
             bool(self.check_coch_camioneta.isChecked()),
@@ -10696,9 +10887,10 @@ class ConfiguracionDialog(QDialog):
         self.input_alias.setText(_config_get("empresa_alias", ""))
         self.input_cbu.setText(_config_get("empresa_cbu", ""))
         self.input_wa_template.setPlainText(
-            _config_get("wa_recordatorio_template", _plantilla_whatsapp_default())
+            _sanitizar_template_whatsapp(
+                _config_get("wa_recordatorio_template", _plantilla_whatsapp_default())
+            )
         )
-        self.input_moneda.setText(_config_get("simbolo_moneda", "$"))
         self.input_dir_reportes.setText(_config_get("dir_reportes", ""))
         self.input_dir_comprobantes.setText(_config_get("dir_comprobantes", ""))
         self.input_dir_tickets_salida.setText(_config_get("dir_tickets_salida", ""))
@@ -10707,6 +10899,9 @@ class ConfiguracionDialog(QDialog):
         self.combo_resolucion.setCurrentIndex(idx_res if idx_res >= 0 else 1)
         tema = (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower()
         self.combo_tema.setCurrentIndex(1 if tema == "claro" else 0)
+        tamano_texto = _ui_tamano_texto()
+        idx_tamano = self.combo_tamano_texto.findData(tamano_texto)
+        self.combo_tamano_texto.setCurrentIndex(idx_tamano if idx_tamano >= 0 else 1)
         self.check_coch_auto.setChecked(_config_get_bool("coch_perm_auto", True))
         self.check_coch_moto.setChecked(_config_get_bool("coch_perm_moto", True))
         self.check_coch_camioneta.setChecked(_config_get_bool("coch_perm_camioneta", True))
@@ -10761,9 +10956,9 @@ class ConfiguracionDialog(QDialog):
         )
 
     def _guardar(self):
-        moneda = (self.input_moneda.text() or "$").strip() or "$"
         tema = "claro" if self.combo_tema.currentText() == "Claro" else "oscuro"
         resolucion = self.combo_resolucion.currentText()
+        tamano_texto = self.combo_tamano_texto.currentData() or "grande"
         dir_reportes = self.input_dir_reportes.text().strip()
         dir_comprobantes = self.input_dir_comprobantes.text().strip()
         dir_tickets_salida = self.input_dir_tickets_salida.text().strip()
@@ -10781,6 +10976,7 @@ class ConfiguracionDialog(QDialog):
             )
             return
         try:
+            # Primero dejo listas las carpetas, porque si no despues exportar o guardar comprobantes falla al pedo.
             if dir_reportes:
                 Path(dir_reportes).mkdir(parents=True, exist_ok=True)
             if dir_comprobantes:
@@ -10795,14 +10991,14 @@ class ConfiguracionDialog(QDialog):
             ok = _config_set("empresa_cbu", self.input_cbu.text().strip()) and ok
             ok = _config_set(
                 "wa_recordatorio_template",
-                self.input_wa_template.toPlainText().strip(),
+                _sanitizar_template_whatsapp(self.input_wa_template.toPlainText()),
             ) and ok
-            ok = _config_set("simbolo_moneda", moneda) and ok
             ok = _config_set("dir_reportes", dir_reportes) and ok
             ok = _config_set("dir_comprobantes", dir_comprobantes) and ok
             ok = _config_set("dir_tickets_salida", dir_tickets_salida) and ok
             ok = _config_set("ui_tema", tema) and ok
             ok = _config_set("ui_resolucion", resolucion) and ok
+            ok = _config_set("ui_tamano_texto", tamano_texto) and ok
             ok = _config_set("coch_perm_auto", "1" if coch_perm_auto else "0") and ok
             ok = _config_set("coch_perm_moto", "1" if coch_perm_moto else "0") and ok
             ok = _config_set("coch_perm_camioneta", "1" if coch_perm_camioneta else "0") and ok
@@ -11501,6 +11697,10 @@ class VentanaPrincipal(QMainWindow):
         self.move(marco.topLeft())
 
     def _aplicar_preferencias_ui(self):
+        app = QApplication.instance()
+        _aplicar_fuente_aplicacion(app)
+        if app is not None:
+            self.setFont(app.font())
         tema = (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower()
         if tema == "claro":
             self.setStyleSheet(self._estilo_claro())
@@ -11519,27 +11719,32 @@ class VentanaPrincipal(QMainWindow):
                 pass
 
         kpi_title_font = QFont()
-        kpi_title_font.setPointSize(8)
+        kpi_title_font.setPointSize(_ui_escalar_pt(8, minimo=8))
         kpi_title_font.setBold(True)
 
         kpi_value_font = QFont()
-        kpi_value_font.setPointSize(11)
+        kpi_value_font.setPointSize(_ui_escalar_pt(11, minimo=11))
         kpi_value_font.setBold(True)
 
         if hasattr(self.ui, "verticalLayout"):
-            self.ui.verticalLayout.setContentsMargins(4, 2, 4, 2)
+            self.ui.verticalLayout.setContentsMargins(
+                _ui_escalar_px(4, minimo=4),
+                _ui_escalar_px(2, minimo=2),
+                _ui_escalar_px(4, minimo=4),
+                _ui_escalar_px(2, minimo=2),
+            )
             self.ui.verticalLayout.setSpacing(0)
 
         if hasattr(self.ui, "modeButtonsLayout"):
             self.ui.modeButtonsLayout.setContentsMargins(0, 0, 0, 0)
-            self.ui.modeButtonsLayout.setSpacing(4)
+            self.ui.modeButtonsLayout.setSpacing(_ui_escalar_px(4, minimo=4))
 
         if hasattr(self.ui, "cocheraLayout"):
-            self.ui.cocheraLayout.setSpacing(2)
+            self.ui.cocheraLayout.setSpacing(_ui_escalar_px(2, minimo=2))
             self.ui.cocheraLayout.setContentsMargins(0, 0, 0, 0)
 
         if hasattr(self.ui, "estacionamientoLayout"):
-            self.ui.estacionamientoLayout.setSpacing(2)
+            self.ui.estacionamientoLayout.setSpacing(_ui_escalar_px(2, minimo=2))
             self.ui.estacionamientoLayout.setContentsMargins(0, 0, 0, 0)
 
         if hasattr(self.ui, "cocheraLayout") and hasattr(
@@ -11551,15 +11756,15 @@ class VentanaPrincipal(QMainWindow):
             self.ui.group_cochera_resumen.setSizePolicy(
                 QSizePolicy.Expanding, QSizePolicy.Fixed
             )
-            self.ui.group_cochera_resumen.setMaximumHeight(200)
+            self.ui.group_cochera_resumen.setMaximumHeight(_ui_escalar_px(200, minimo=200))
 
         if hasattr(self.ui, "kpiGrid"):
             for col in range(3):
                 self.ui.kpiGrid.setColumnStretch(col, 1)
             self.ui.kpiGrid.setRowStretch(0, 0)
             self.ui.kpiGrid.setRowStretch(1, 0)
-            self.ui.kpiGrid.setHorizontalSpacing(6)
-            self.ui.kpiGrid.setVerticalSpacing(6)
+            self.ui.kpiGrid.setHorizontalSpacing(_ui_escalar_px(6, minimo=6))
+            self.ui.kpiGrid.setVerticalSpacing(_ui_escalar_px(6, minimo=6))
 
         for card_name in (
             "card_total",
@@ -11571,8 +11776,8 @@ class VentanaPrincipal(QMainWindow):
             card = getattr(self.ui, card_name, None)
             if card:
                 card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-                card.setMinimumHeight(48)
-                card.setMaximumHeight(80)
+                card.setMinimumHeight(_ui_escalar_px(48, minimo=48))
+                card.setMaximumHeight(_ui_escalar_px(80, minimo=80))
 
         for name in (
             "label_total_title",
@@ -11597,29 +11802,34 @@ class VentanaPrincipal(QMainWindow):
                 label.setFont(kpi_value_font)
 
         if hasattr(self.ui, "cochera_resumen_layout"):
-            self.ui.cochera_resumen_layout.setContentsMargins(6, 6, 6, 6)
-            self.ui.cochera_resumen_layout.setSpacing(6)
+            self.ui.cochera_resumen_layout.setContentsMargins(
+                _ui_escalar_px(6, minimo=6),
+                _ui_escalar_px(6, minimo=6),
+                _ui_escalar_px(6, minimo=6),
+                _ui_escalar_px(6, minimo=6),
+            )
+            self.ui.cochera_resumen_layout.setSpacing(_ui_escalar_px(6, minimo=6))
 
         titulo_font = QFont()
-        titulo_font.setPointSize(12)
+        titulo_font.setPointSize(_ui_escalar_pt(12, minimo=12))
         titulo_font.setBold(True)
 
         for name in ("label_cochera_title",):
             label = getattr(self.ui, name, None)
             if label:
                 label.setFont(titulo_font)
-                label.setMaximumHeight(26)
+                label.setMaximumHeight(_ui_escalar_px(26, minimo=26))
                 label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         fecha_font = QFont()
-        fecha_font.setPointSize(14)
+        fecha_font.setPointSize(_ui_escalar_pt(14, minimo=14))
         fecha_font.setBold(True)
 
         for name in ("label_fecha_num", "label_est_fecha_num", "label_hora_value"):
             label = getattr(self.ui, name, None)
             if label:
                 label.setFont(fecha_font)
-                label.setMaximumHeight(24)
+                label.setMaximumHeight(_ui_escalar_px(24, minimo=24))
                 label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         if hasattr(self.ui, "label_hora_value"):
@@ -11647,11 +11857,16 @@ class VentanaPrincipal(QMainWindow):
                 self.ui.group_est_resumen.setObjectName("group_est_resumen")
                 self.ui.group_est_resumen.setTitle("Resumen estacionamiento")
                 self.ui.est_resumen_layout = QVBoxLayout(self.ui.group_est_resumen)
-                self.ui.est_resumen_layout.setContentsMargins(6, 6, 6, 6)
-                self.ui.est_resumen_layout.setSpacing(6)
+                self.ui.est_resumen_layout.setContentsMargins(
+                    _ui_escalar_px(6, minimo=6),
+                    _ui_escalar_px(6, minimo=6),
+                    _ui_escalar_px(6, minimo=6),
+                    _ui_escalar_px(6, minimo=6),
+                )
+                self.ui.est_resumen_layout.setSpacing(_ui_escalar_px(6, minimo=6))
                 self.ui.est_resumen_grid = QGridLayout()
-                self.ui.est_resumen_grid.setHorizontalSpacing(6)
-                self.ui.est_resumen_grid.setVerticalSpacing(6)
+                self.ui.est_resumen_grid.setHorizontalSpacing(_ui_escalar_px(6, minimo=6))
+                self.ui.est_resumen_grid.setVerticalSpacing(_ui_escalar_px(6, minimo=6))
                 for col in range(4):
                     self.ui.est_resumen_grid.setColumnStretch(col, 1)
 
@@ -11660,8 +11875,13 @@ class VentanaPrincipal(QMainWindow):
                     card.setObjectName(nombre_card)
                     card.setFrameShape(QFrame.StyledPanel)
                     layout_card = QVBoxLayout(card)
-                    layout_card.setContentsMargins(6, 6, 6, 6)
-                    layout_card.setSpacing(4)
+                    layout_card.setContentsMargins(
+                        _ui_escalar_px(6, minimo=6),
+                        _ui_escalar_px(6, minimo=6),
+                        _ui_escalar_px(6, minimo=6),
+                        _ui_escalar_px(6, minimo=6),
+                    )
+                    layout_card.setSpacing(_ui_escalar_px(4, minimo=4))
                     lbl_title = QLabel(card)
                     lbl_title.setObjectName(nombre_title)
                     lbl_title.setAlignment(Qt.AlignCenter)
@@ -11720,8 +11940,8 @@ class VentanaPrincipal(QMainWindow):
 
         if hasattr(self.ui, "group_est_resumen"):
             self.ui.group_est_resumen.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.ui.group_est_resumen.setMaximumHeight(150)
-            self.ui.group_est_resumen.setMinimumHeight(95)
+            self.ui.group_est_resumen.setMaximumHeight(_ui_escalar_px(150, minimo=150))
+            self.ui.group_est_resumen.setMinimumHeight(_ui_escalar_px(95, minimo=95))
 
         if hasattr(self.ui, "group_est_acciones") and not hasattr(self.ui, "btn_reportes_est"):
             self.ui.btn_reportes_est = QPushButton(self.ui.group_est_acciones)
@@ -11773,8 +11993,8 @@ class VentanaPrincipal(QMainWindow):
             btn = getattr(self.ui, name, None)
             if not btn:
                 continue
-            btn.setMinimumHeight(26)
-            btn.setMaximumHeight(32)
+            btn.setMinimumHeight(_ui_escalar_px(26, minimo=26))
+            btn.setMaximumHeight(_ui_escalar_px(32, minimo=32))
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         if hasattr(self.ui, "btn_ingreso_est"):
@@ -11797,11 +12017,16 @@ class VentanaPrincipal(QMainWindow):
             group = getattr(self.ui, group_name, None)
             if group:
                 group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                group.setMaximumHeight(64)
+                group.setMaximumHeight(_ui_escalar_px(64, minimo=64))
             layout = getattr(self.ui, layout_name, None)
             if layout:
-                layout.setContentsMargins(4, 4, 4, 4)
-                layout.setSpacing(4)
+                layout.setContentsMargins(
+                    _ui_escalar_px(4, minimo=4),
+                    _ui_escalar_px(4, minimo=4),
+                    _ui_escalar_px(4, minimo=4),
+                    _ui_escalar_px(4, minimo=4),
+                )
+                layout.setSpacing(_ui_escalar_px(4, minimo=4))
 
         if hasattr(self.ui, "accionesCocheraLayout"):
             acciones = [
@@ -11821,7 +12046,7 @@ class VentanaPrincipal(QMainWindow):
                 self.ui.accionesCocheraLayout.removeItem(self.ui.accionesCocheraSpacer)
 
         if hasattr(self.ui, "fechaHoraLayout"):
-            self.ui.fechaHoraLayout.setSpacing(4)
+            self.ui.fechaHoraLayout.setSpacing(_ui_escalar_px(4, minimo=4))
 
         if hasattr(self.ui, "cocheraLayout"):
             self.ui.cocheraLayout.addStretch(1)
@@ -12164,7 +12389,7 @@ class VentanaPrincipal(QMainWindow):
             ),
             "btn_estacionamiento": (
                 "Abre el modo Estacionamiento.\n"
-                "Aqui registras ingresos y salidas por hora, eliges metodo de pago y ves los vehiculos activos.\n"
+                "Aqui registras ingresos y salidas por hora, cobras al confirmar la salida y ves los vehiculos activos.\n"
                 "Atajo: F2."
             ),
             "btn_modo_sencillo": (
@@ -12207,12 +12432,12 @@ class VentanaPrincipal(QMainWindow):
             ),
             "btn_ingreso_est": (
                 "Registra un nuevo ingreso en estacionamiento.\n"
-                "Aqui guardas patente, espacio, tipo de vehiculo y metodo de pago.\n"
+                "Aqui guardas patente, espacio y tipo de vehiculo.\n"
                 "Atajo: F9."
             ),
             "btn_salida_est": (
                 "Registra la salida de un vehiculo.\n"
-                "Aqui calculas el cobro final, generas el ticket y liberas el espacio.\n"
+                "Aqui calculas el cobro final, eliges el metodo de pago, generas el ticket y liberas el espacio.\n"
                 "Atajo: F10."
             ),
         }
@@ -12441,6 +12666,10 @@ class VentanaPrincipal(QMainWindow):
 
         if hasattr(self.ui, "combo_metodo_est") and self.ui.combo_metodo_est.findText("QR") < 0:
             self.ui.combo_metodo_est.addItem("QR")
+        if hasattr(self.ui, "label_est_metodo"):
+            self.ui.label_est_metodo.setVisible(False)
+        if hasattr(self.ui, "combo_metodo_est"):
+            self.ui.combo_metodo_est.setVisible(False)
 
         if hasattr(self.ui, "input_patente_est"):
             self.ui.input_patente_est.setMaxLength(10)
@@ -12457,22 +12686,16 @@ class VentanaPrincipal(QMainWindow):
         self.ui.btn_ingreso_est.clicked.connect(self._registrar_ingreso_est)
         self.ui.btn_salida_est.clicked.connect(self._registrar_salida_est)
         self.ui.input_espacio_est.editingFinished.connect(self._validar_espacio_est)
-        if hasattr(self.ui, "combo_metodo_est"):
-            self.ui.combo_metodo_est.installEventFilter(self)
-            try:
-                self.ui.combo_metodo_est.view().installEventFilter(self)
-            except Exception:
-                pass
         enter_map_est = {}
         if hasattr(self.ui, "input_patente_est") and hasattr(self.ui, "input_espacio_est"):
             enter_map_est[self.ui.input_patente_est] = self.ui.input_espacio_est
         if hasattr(self.ui, "input_espacio_est"):
             if hasattr(self.ui, "combo_tipo_vehiculo_est"):
                 enter_map_est[self.ui.input_espacio_est] = self.ui.combo_tipo_vehiculo_est
-            elif hasattr(self.ui, "combo_metodo_est"):
-                enter_map_est[self.ui.input_espacio_est] = self.ui.combo_metodo_est
-        if hasattr(self.ui, "combo_tipo_vehiculo_est") and hasattr(self.ui, "combo_metodo_est"):
-            enter_map_est[self.ui.combo_tipo_vehiculo_est] = self.ui.combo_metodo_est
+            elif hasattr(self.ui, "btn_ingreso_est"):
+                enter_map_est[self.ui.input_espacio_est] = ("click", self.ui.btn_ingreso_est)
+        if hasattr(self.ui, "combo_tipo_vehiculo_est") and hasattr(self.ui, "btn_ingreso_est"):
+            enter_map_est[self.ui.combo_tipo_vehiculo_est] = ("click", self.ui.btn_ingreso_est)
         if enter_map_est:
             _instalar_enter_navegacion(self, enter_map_est)
         self._activos_est_cache = []
@@ -12497,16 +12720,22 @@ class VentanaPrincipal(QMainWindow):
         if combo is None:
             return
         tipos = _tipos_vehiculo_config_estacionamiento()
-        actual = _normalizar_tipo_vehiculo(combo.currentData() or combo.currentText())
+        actual = combo.currentData()
+        if actual is None:
+            actual = combo.currentText()
+        actual = _normalizar_tipo_vehiculo(actual) if str(actual or "").strip() else ""
         combo.blockSignals(True)
         combo.clear()
+        combo.addItem("Seleccionar tipo...", "")
         for texto, codigo in tipos:
             combo.addItem(texto, codigo)
         combo.setEnabled(bool(tipos))
         if tipos:
             idx = combo.findData(actual)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
-            combo.setToolTip("")
+            combo.setToolTip(
+                "Selecciona el tipo de vehiculo antes de registrar el ingreso."
+            )
         else:
             combo.setToolTip(
                 "No hay tipos de vehiculo habilitados en Configuracion > Sistema."
@@ -12520,11 +12749,55 @@ class VentanaPrincipal(QMainWindow):
                 else "No hay tipos de vehiculo habilitados para estacionamiento."
             )
 
+    def _resetear_tipo_vehiculo_est(self):
+        combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
+        if combo is None or combo.count() <= 0:
+            return
+        combo.setCurrentIndex(0)
+
+    def _metodos_pago_est(self):
+        combo = getattr(self.ui, "combo_metodo_est", None)
+        if combo is None:
+            return ["Efectivo", "Tarjeta", "Transferencia", "QR"]
+        metodos = [
+            combo.itemText(i).strip()
+            for i in range(combo.count())
+            if combo.itemText(i).strip()
+        ]
+        return metodos or ["Efectivo", "Tarjeta", "Transferencia", "QR"]
+
+    def _solicitar_metodo_pago_est(self, total=0.0, popup_parent=None):
+        metodos = self._metodos_pago_est()
+        combo = getattr(self.ui, "combo_metodo_est", None)
+        actual = (combo.currentText() or "").strip() if combo is not None else ""
+        if actual not in metodos:
+            actual = metodos[0]
+        idx_actual = metodos.index(actual) if actual in metodos else 0
+        metodo, ok = QInputDialog.getItem(
+            popup_parent or self,
+            "Metodo de pago",
+            "Selecciona el metodo de pago para esta salida.\n"
+            f"Total: {_fmt_money(total)}",
+            metodos,
+            idx_actual,
+            False,
+        )
+        metodo = str(metodo or "").strip()
+        if not ok or not metodo:
+            return ""
+        if combo is not None:
+            idx = combo.findText(metodo, Qt.MatchExactly)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        return metodo
+
     def _tipo_vehiculo_est_db(self):
         combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
         if combo is None:
             return ""
-        valor = combo.currentData() or combo.currentText()
+        valor = combo.currentData()
+        if valor is None:
+            valor = combo.currentText()
         if not str(valor or "").strip():
             return ""
         return _normalizar_tipo_vehiculo(valor)
@@ -12667,18 +12940,6 @@ class VentanaPrincipal(QMainWindow):
             return
         patente_fmt = _formatear_patente_estacionamiento(texto)
         self.ui.input_patente_est.setText(patente_fmt)
-        if _patente_est_es_moto(texto):
-            combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
-            if _tipo_vehiculo_habilitado_estacionamiento("MOTO"):
-                if combo is not None:
-                    idx = combo.findData("MOTO")
-                    if idx >= 0:
-                        combo.setCurrentIndex(idx)
-            else:
-                self._log_estacionamiento(
-                    "El tipo Moto no esta habilitado para estacionamiento.\nRevisalo en Configuracion > Sistema.",
-                    "warn",
-                )
 
     def _espacio_desde_tabla_est(self, row, column):
         table = self.ui.table_est_activos
@@ -13459,19 +13720,21 @@ class VentanaPrincipal(QMainWindow):
         self.ui.input_patente_est.setText(patente_fmt)
         codigo = self.ui.input_espacio_est.text().strip().upper()
         tipo_vehiculo = self._tipo_vehiculo_est_db()
-        if _patente_est_es_moto(patente):
-            tipo_vehiculo = "MOTO"
-            combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
-            if combo is not None:
-                idx = combo.findData("MOTO")
-                if idx >= 0:
-                    combo.setCurrentIndex(idx)
         if not tipo_vehiculo:
+            mensaje_tipo = (
+                "No hay tipos de vehiculo habilitados para estacionamiento.\n"
+                "Activalos en Configuracion > Sistema."
+                if not _tipos_vehiculo_config_estacionamiento()
+                else "Selecciona un tipo de vehiculo antes de registrar el ingreso."
+            )
             self._log_estacionamiento(
-                "No hay tipos de vehiculo habilitados para estacionamiento.\nActivalos en Configuracion > Sistema.",
+                mensaje_tipo,
                 "warn",
                 popup_parent=popup_parent,
             )
+            combo = getattr(self.ui, "combo_tipo_vehiculo_est", None)
+            if combo is not None:
+                combo.setFocus()
             return
         if not _tipo_vehiculo_habilitado_estacionamiento(tipo_vehiculo):
             self._log_estacionamiento(
@@ -13601,6 +13864,7 @@ class VentanaPrincipal(QMainWindow):
             box.addButton(QMessageBox.Ok)
             box.exec()
             self.ui.input_patente_est.clear()
+            self._resetear_tipo_vehiculo_est()
             self._actualizar_activos_est()
         except sqlite3.Error:
             self._log_estacionamiento(
@@ -13629,8 +13893,6 @@ class VentanaPrincipal(QMainWindow):
             return
         if not _antirebote_iniciar(self, "est_salida"):
             return
-
-        metodo = self.ui.combo_metodo_est.currentText()
 
         conn = None
         try:
@@ -13679,7 +13941,6 @@ class VentanaPrincipal(QMainWindow):
                 f"Ingreso: {ingreso_txt}\n"
                 f"Salida: {salida_txt}\n"
                 f"Horas cobradas: {horas_cobradas}\n"
-                f"Metodo: {metodo}\n"
                 f"Precio: {_fmt_money(total)}\n\n"
                 "Aceptar esta salida?"
             )
@@ -13691,6 +13952,13 @@ class VentanaPrincipal(QMainWindow):
                 QMessageBox.Yes,
             )
             if confirmar != QMessageBox.Yes:
+                return
+
+            metodo = self._solicitar_metodo_pago_est(
+                total=total,
+                popup_parent=popup_parent,
+            )
+            if not metodo:
                 return
 
             cur.execute(
@@ -13794,6 +14062,7 @@ class VentanaPrincipal(QMainWindow):
 if __name__ == "__main__":
     init_db()
     app = QApplication(sys.argv)
+    _aplicar_fuente_aplicacion(app)
     sys.excepthook = _manejar_excepcion_no_controlada
     app._dialog_translation_filter = _DialogTranslationFilter(app)
     app.installEventFilter(app._dialog_translation_filter)
