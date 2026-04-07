@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import os
 import sqlite3
 import subprocess
@@ -184,6 +184,7 @@ def _consultar_estado_cliente(id_cliente):
             conn.close()
 
 
+# Deja registro de acciones importantes para no perder trazabilidad
 def _auditar(widget, accion, detalle=""):
     conn = None
     try:
@@ -201,6 +202,7 @@ def _auditar(widget, accion, detalle=""):
             conn.close()
 
 
+# Muestra el error de forma mas clara y deja detalle si hace falta
 def _mostrar_error(widget, titulo, mensaje, accion=None, detalle=None):
     detalle_texto = _detalle_error_breve(detalle)
     detalle_extendido = _detalle_error_extendido(detalle)
@@ -218,6 +220,7 @@ def _mostrar_error(widget, titulo, mensaje, accion=None, detalle=None):
         _auditar(widget, accion, detalle_texto or detalle or mensaje)
 
 
+# Resume el fallo para que no salga una pared de texto
 def _detalle_error_breve(detalle=None):
     if isinstance(detalle, BaseException):
         nombre = detalle.__class__.__name__
@@ -237,6 +240,7 @@ def _detalle_error_breve(detalle=None):
     return ""
 
 
+# Guarda el detalle largo por si hay que mirar mas a fondo
 def _detalle_error_extendido(detalle=None):
     if isinstance(detalle, BaseException):
         return "".join(
@@ -255,6 +259,7 @@ def _detalle_error_extendido(detalle=None):
     return texto
 
 
+# Evita que un error inesperado quede mudo o cierre todo feo
 def _manejar_excepcion_no_controlada(exc_type, exc_value, exc_tb):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_tb)
@@ -277,6 +282,7 @@ def _manejar_excepcion_no_controlada(exc_type, exc_value, exc_tb):
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 
 
+# Esto frena cierres accidentales cuando todavia hay cambios
 def _confirmar_guardado_pendiente(widget, mensaje):
     return QMessageBox.question(
         widget,
@@ -368,6 +374,7 @@ def _traducir_botones_widget(widget):
 
 
 class _DialogTranslationFilter(QObject):
+    # Engancha eventos puntuales para que la interfaz responda mejor
     def eventFilter(self, watched, event):
         if event.type() in (
             QEvent.Polish,
@@ -384,6 +391,7 @@ class _DialogTranslationFilter(QObject):
         return super().eventFilter(watched, event)
 
 
+# Evita dobles clics o acciones repetidas en pocos segundos
 def _antirebote_iniciar(obj, clave):
     bloqueos = getattr(obj, "_antirebote_bloqueos", None)
     if bloqueos is None:
@@ -395,6 +403,7 @@ def _antirebote_iniciar(obj, clave):
     return True
 
 
+# Libera el bloqueo cuando ya paso el tiempo seguro
 def _antirebote_finalizar(obj, clave, cooldown_ms=650, on_release=None):
     bloqueos = getattr(obj, "_antirebote_bloqueos", None)
     if not isinstance(bloqueos, set):
@@ -439,6 +448,7 @@ class _EnterNavigationFilter(QObject):
         except Exception:
             pass
 
+    # Engancha eventos puntuales para que la interfaz responda mejor
     def eventFilter(self, obj, event):
         if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter):
             destino = self._mapping.get(obj)
@@ -481,6 +491,7 @@ class _EnterNavigationFilter(QObject):
                 pass
 
 
+# Hace que Enter vaya guiando el formulario sin cortar el ritmo
 def _instalar_enter_navegacion(owner, mapping):
     filtros = getattr(owner, "_enter_nav_filters", None)
     if filtros is None:
@@ -536,10 +547,12 @@ def _configurar_spinbox_numerico(spinbox):
         pass
 
 
+# Aplica la tolerancia para no cobrar de mas por minutos chicos
 def _horas_cobradas_con_tolerancia(segundos, tolerancia_min=15):
     return svc_horas_cobradas_tolerancia(segundos, tolerancia_min=tolerancia_min)
 
 
+# De este calculo sale el cobro real del estacionamiento
 def _calcular_total_estadia(dt_ingreso, dt_salida, tarifa_hora, tolerancia_min=15):
     return svc_calcular_total_estadia(
         dt_ingreso,
@@ -605,7 +618,7 @@ def _normalizar_patente(texto):
 
 def _formatear_patente(texto):
     patente = _normalizar_patente(texto)
-    # Aca meto el espacio solo cuando el formato ya cierra, asi no inventamos una patente rara.
+    # El espacio aparece solo cuando el formato ya cierra, asi no inventamos una patente rara
     if re.fullmatch(r"[A-Z]{2}\d{3}[A-Z]{2}", patente):
         return f"{patente[:2]} {patente[2:5]} {patente[5:]}"
     if re.fullmatch(r"[A-Z]{3}\d{3}", patente):
@@ -634,6 +647,7 @@ def _patente_est_formato_valido(texto):
         re.fullmatch(r"[A-Z]{2}\d{3}[A-Z]{2}", patente)
         or re.fullmatch(r"[A-Z]{3}\d{3}", patente)
         or re.fullmatch(r"\d{3}[A-Z]{3}", patente)
+        or re.fullmatch(r"[A-Z]\d{3}[A-Z]{3}", patente)
     )
 
 
@@ -641,7 +655,10 @@ def _patente_es_moto(texto):
     patente = _normalizar_patente(texto)
     if not patente:
         return False
-    return bool(re.fullmatch(r"\d{3}[A-Z]{3}", patente))
+    return bool(
+        re.fullmatch(r"\d{3}[A-Z]{3}", patente)
+        or re.fullmatch(r"[A-Z]\d{3}[A-Z]{3}", patente)
+    )
 
 
 def _patente_est_es_moto(texto):
@@ -651,6 +668,8 @@ def _patente_est_es_moto(texto):
 def _formatear_patente_estacionamiento(texto):
     patente = _normalizar_patente(texto)
     if re.fullmatch(r"\d{3}[A-Z]{3}", patente):
+        return f"{patente[:3]} {patente[3:]}"
+    if re.fullmatch(r"[A-Z]\d{3}[A-Z]{3}", patente):
         return f"{patente[:3]} {patente[3:]}"
     return _formatear_patente(texto)
 
@@ -680,6 +699,7 @@ def _plantilla_whatsapp_default():
     )
 
 
+# Limpia variables viejas o rotas antes de usar el mensaje
 def _sanitizar_template_whatsapp(texto):
     plantilla = str(texto or "").strip()
     if not plantilla:
@@ -692,6 +712,7 @@ def _sanitizar_template_whatsapp(texto):
     return plantilla.strip() or _plantilla_whatsapp_default()
 
 
+# Arma el texto final con los datos reales del cliente
 def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
     plantilla = _sanitizar_template_whatsapp(
         _config_get("wa_recordatorio_template", _plantilla_whatsapp_default())
@@ -728,6 +749,7 @@ def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
         )
 
 
+# Saca la cuota que conviene mostrar en el recordatorio
 def _texto_cuota_recordatorio(tipo_vehiculo="AUTO", monto_contrato=0.0):
     monto_actual = svc_obtener_tarifa_mensual_actual(tipo_vehiculo)
     if monto_actual is None or float(monto_actual or 0.0) <= 0:
@@ -767,6 +789,7 @@ def _fecha_contrato_qdate(valor):
     return fecha if fecha.isValid() else QDate()
 
 
+# Separa contratos activos, vencidos o historicos para mostrarlos bien
 def _clasificar_contrato_vista(row, hoy=None):
     hoy = hoy or QDate.currentDate()
     en_historial = int(row.get("en_historial") or 0) == 1
@@ -790,6 +813,7 @@ def _clasificar_contrato_vista(row, hoy=None):
     }
 
 
+# Saca la tarifa correcta segun el tipo de vehiculo
 def _tarifa_hora_desde_row(row, tipo_vehiculo="AUTO"):
     if not row:
         return None
@@ -818,6 +842,7 @@ def _tarifa_hora_desde_row(row, tipo_vehiculo="AUTO"):
     return auto or base or moto or camioneta
 
 
+# Hace lo mismo pero con la parte mensual
 def _tarifa_mensual_desde_row(row, tipo_vehiculo="AUTO"):
     if not row:
         return None
@@ -2555,6 +2580,7 @@ class UsuariosDialog(QDialog):
             if conn:
                 conn.close()
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if self._hay_operador_pendiente():
             respuesta = _confirmar_guardado_pendiente(
@@ -2864,6 +2890,7 @@ class IngresoRapidoEstDialog(QDialog):
             return ""
         return _normalizar_tipo_vehiculo(valor)
 
+    # Solo deja cerrar aceptando cuando lo cargado tiene sentido
     def accept(self):
         patente = _normalizar_patente(self.input_patente.text())
         if not patente:
@@ -3285,6 +3312,7 @@ class ModoSencilloEstacionamientoDialog(QDialog):
         dlg.exec()
         self._refrescar_estado()
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         try:
             self.ventana._restaurar_desde_modo_sencillo(self)
@@ -4446,6 +4474,7 @@ class ContratosDialog(QDialog):
                 conn.close()
             _antirebote_finalizar(self, "contratos_crear", cooldown_ms=700)
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._hay_cambios_sin_guardar():
             event.accept()
@@ -5511,6 +5540,7 @@ class ClientesDialog(QDialog):
         self._guardar_historial_modelos()
         self._actualizar_completer_modelos()
 
+    # Engancha eventos puntuales para que la interfaz responda mejor
     def eventFilter(self, obj, event):
         if (
             obj in getattr(self, "_enter_next_map", {})
@@ -6062,6 +6092,7 @@ class ClientesDialog(QDialog):
                 conn.close()
             _antirebote_finalizar(self, "clientes_guardar", cooldown_ms=650)
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._hay_cambios_sin_guardar():
             event.accept()
@@ -6251,7 +6282,7 @@ class ClientesDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Patente",
-                "Patente invalida. Formatos validos: AA 123 AA, AAA 123 o 123 ABC.",
+                "Patente invalida. Formatos validos: AA 123 AA, AAA 123, 123 ABC o A12 3BCD.",
             )
             return
         if _patente_es_moto(patente):
@@ -7195,6 +7226,7 @@ class TarifaDialog(QDialog):
                 conn.close()
             _antirebote_finalizar(self, "tarifas_guardar", cooldown_ms=700)
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._hay_cambios_sin_guardar():
             event.accept()
@@ -7483,6 +7515,7 @@ class ColoresMapaDialog(QDialog):
     def _hay_cambios_sin_guardar(self):
         return self._snapshot_colores() != self._snapshot
 
+    # Cancela este paso sin tocar datos
     def reject(self):
         if not self._hay_cambios_sin_guardar():
             super().reject()
@@ -8584,6 +8617,7 @@ class MapaCocheraDialog(QDialog):
             if conn:
                 conn.close()
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._editable or not self._mapa_tiene_cambios():
             event.accept()
@@ -10442,6 +10476,7 @@ class CajaDiariaDialog(QDialog):
         )
         self._cargar()
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._hay_cambios_sin_guardar():
             event.accept()
@@ -11014,6 +11049,7 @@ class ConfiguracionDialog(QDialog):
         except (sqlite3.Error, OSError):
             _mostrar_error(self, "Error", "No se pudo guardar la configuracion.")
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._hay_cambios_sin_guardar():
             event.accept()
@@ -12219,57 +12255,6 @@ class VentanaPrincipal(QMainWindow):
             self._actualizar_tipos_estacionamiento_ui()
         self._programar_popup_primeros_pasos()
 
-    def _ejecutar_tests(self):
-        base_dir = Path(__file__).resolve().parent
-        tests_dir = base_dir / "tests"
-        if not tests_dir.exists():
-            QMessageBox.warning(self, "Tests", "No existe la carpeta de tests.")
-            return
-
-        cmd = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"]
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(base_dir),
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        except Exception:
-            _mostrar_error(self, "Tests", "No se pudieron ejecutar los tests.")
-            return
-
-        salida = (proc.stdout or "").strip()
-        errores = (proc.stderr or "").strip()
-        detalle = "\n".join([s for s in (salida, errores) if s]).strip()
-        lineas = [ln.strip() for ln in detalle.splitlines() if ln.strip()]
-        resumen = ""
-        for ln in reversed(lineas):
-            if ln.startswith("Ran ") or ln == "OK" or ln.startswith("FAILED"):
-                resumen = ln if not resumen else f"{ln} | {resumen}"
-                if ln.startswith("Ran "):
-                    break
-        if not resumen:
-            resumen = "Ejecucion finalizada."
-
-        if proc.returncode == 0:
-            titulo = "Tests"
-            texto = f"Tests OK.\n{resumen}"
-            icono = QMessageBox.Information
-        else:
-            titulo = "Tests"
-            texto = f"Hay fallas en tests.\n{resumen}"
-            icono = QMessageBox.Warning
-
-        box = QMessageBox(self)
-        box.setIcon(icono)
-        box.setWindowTitle(titulo)
-        box.setText(texto)
-        if detalle:
-            box.setDetailedText(detalle[-12000:])
-        box.exec()
-        _auditar(self, "Ejecucion de tests", f"returncode={proc.returncode} - {resumen}")
-
     def _probar_error(self):
         _mostrar_error(self, "Error simulado", "Este es un ejemplo de error.")
 
@@ -12607,6 +12592,7 @@ class VentanaPrincipal(QMainWindow):
         if combo.hasFocus():
             combo.showPopup()
 
+    # Engancha eventos puntuales para que la interfaz responda mejor
     def eventFilter(self, obj, event):
         combo = getattr(self.ui, "combo_metodo_est", None)
         if combo is not None and event.type() == QEvent.KeyPress:
@@ -13194,6 +13180,7 @@ class VentanaPrincipal(QMainWindow):
         if path:
             self._backup_ultimo = datetime.now()
 
+    # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         super().closeEvent(event)
 
@@ -13748,7 +13735,7 @@ class VentanaPrincipal(QMainWindow):
             return
         if not _patente_est_formato_valido(patente):
             self._log_estacionamiento(
-                "Patente invalida. Formatos validos: AA 123 AA, AAA 123 o 123 ABC.",
+                "Patente invalida. Formatos validos: AA 123 AA, AAA 123, 123 ABC o A12 3BCD.",
                 "warn",
                 popup_parent=popup_parent,
             )
@@ -13886,7 +13873,7 @@ class VentanaPrincipal(QMainWindow):
             return
         if not _patente_est_formato_valido(patente):
             self._log_estacionamiento(
-                "Patente invalida. Formatos validos: AA 123 AA, AAA 123 o 123 ABC.",
+                "Patente invalida. Formatos validos: AA 123 AA, AAA 123, 123 ABC o A12 3BCD.",
                 "warn",
                 popup_parent=popup_parent,
             )
@@ -14082,4 +14069,3 @@ if __name__ == "__main__":
     ventana.show()
     sys.exit(app.exec())
     
-
