@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -8,19 +9,247 @@ if getattr(sys, "frozen", False):
 else:
     _BASE_DIR = Path(__file__).resolve().parent
 
-DB_PATH = _BASE_DIR / "estacionamiento.db"
+# Portable by default; an explicit data directory keeps launchers/tests isolated.
+_DATA_DIR = os.environ.get("ESTACIONAMIENTO_DATA_DIR", "").strip()
+DB_PATH = (Path(_DATA_DIR).expanduser().resolve() if _DATA_DIR else _BASE_DIR) / "estacionamiento.db"
+SCHEMA_VERSION = 2
+APPLICATION_ID = 0x45535441  # ESTA: identifica esta base, no un SQLite cualquiera.
+
+
+class DatabaseIntegrityError(sqlite3.IntegrityError):
+    """Conflictos existentes que requieren revisión sin eliminar datos."""
+
+    def __init__(self, conflictos):
+        self.conflictos = conflictos
+        detalle = "; ".join(f"{clave}: {len(filas)} caso(s)" for clave, filas in conflictos.items())
+        super().__init__(
+            "La base presenta conflictos de integridad. Los datos se conservaron. "
+            "Revise el respaldo y los registros afectados antes de continuar. " + detalle
+        )
+
+
+def _columnas_tabla(conn, tabla):
+    return {row[1] for row in conn.execute(f'PRAGMA table_info("{tabla}")')}
+
+
+def diagnosticar_integridad_db(conn=None):
+    """Describe conflictos con IDs, sin leer credenciales ni modificar registros."""
+    own_conn = conn is None
+    conn = conn or get_connection()
+    try:
+        conflictos = {}
+        integridad = [row[0] for row in conn.execute("PRAGMA integrity_check")]
+        if integridad != ["ok"]:
+            conflictos["integridad_sqlite"] = integridad
+        referencias = validar_integridad_db(conn)
+        if referencias:
+            conflictos["referencias_invalidas"] = referencias
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        app_id = conn.execute("PRAGMA application_id").fetchone()[0]
+        tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        if app_id not in (0, APPLICATION_ID):
+            conflictos["base_de_otra_aplicacion"] = [(app_id,)]
+        if tablas and not {"clientes", "vehiculos", "espacios", "movimientos"}.issubset(tablas):
+            conflictos["esquema_no_reconocido"] = [tuple(sorted(tablas))]
+        elif tablas:
+            for tabla, campos in {"clientes": {"id_cliente", "dni", "nombre"},
+                                  "vehiculos": {"id_vehiculo", "patente"},
+                                  "espacios": {"id_espacio", "codigo"},
+                                  "movimientos": {"id_movimiento", "id_vehiculo", "id_espacio", "fecha_ingreso", "fecha_salida"}}.items():
+                if not campos.issubset(_columnas_tabla(conn, tabla)):
+                    conflictos.setdefault("columnas_de_esquema_no_reconocidas", []).append((tabla,))
+        if version > SCHEMA_VERSION:
+            conflictos["version_de_esquema_mas_nueva"] = [(version, SCHEMA_VERSION)]
+        columnas = {tabla: _columnas_tabla(conn, tabla) for tabla in (
+            "espacios", "cochera_contratos", "movimientos", "vehiculos")}
+
+        def consultar(clave, sql, requeridas):
+            if all(set(nombres).issubset(columnas[tabla]) for tabla, nombres in requeridas.items()):
+                filas = [tuple(row) for row in conn.execute(sql)]
+                if filas:
+                    conflictos[clave] = filas
+
+        consultar("contratos_activos_por_espacio",
+                  "SELECT id_espacio, COUNT(*) FROM cochera_contratos WHERE activo=1 "
+                  "GROUP BY id_espacio HAVING COUNT(*)>1",
+                  {"cochera_contratos": ("id_espacio", "activo")})
+        consultar("contratos_activos_por_vehiculo",
+                  "SELECT id_vehiculo, COUNT(*) FROM cochera_contratos WHERE activo=1 "
+                  "AND id_vehiculo IS NOT NULL GROUP BY id_vehiculo HAVING COUNT(*)>1",
+                  {"cochera_contratos": ("id_vehiculo", "activo")})
+        consultar("movimientos_abiertos_por_espacio",
+                  "SELECT id_espacio, COUNT(*) FROM movimientos WHERE fecha_salida IS NULL "
+                  "GROUP BY id_espacio HAVING COUNT(*)>1",
+                  {"movimientos": ("id_espacio", "fecha_salida")})
+        consultar("movimientos_abiertos_por_vehiculo",
+                  "SELECT id_vehiculo, COUNT(*) FROM movimientos WHERE fecha_salida IS NULL "
+                  "GROUP BY id_vehiculo HAVING COUNT(*)>1",
+                  {"movimientos": ("id_vehiculo", "fecha_salida")})
+        consultar("espacios_con_contrato_y_estadia",
+                  "SELECT cc.id_contrato,m.id_movimiento,cc.id_espacio FROM cochera_contratos cc "
+                  "JOIN movimientos m ON m.id_espacio=cc.id_espacio "
+                  "WHERE cc.activo=1 AND m.fecha_salida IS NULL",
+                  {"cochera_contratos": ("id_contrato", "id_espacio", "activo"),
+                   "movimientos": ("id_movimiento", "id_espacio", "fecha_salida")})
+        consultar("vehiculos_con_contrato_y_estadia",
+                  "SELECT cc.id_contrato,m.id_movimiento,cc.id_vehiculo FROM cochera_contratos cc "
+                  "JOIN movimientos m ON m.id_vehiculo=cc.id_vehiculo "
+                  "WHERE cc.activo=1 AND m.fecha_salida IS NULL",
+                  {"cochera_contratos": ("id_contrato", "id_vehiculo", "activo"),
+                   "movimientos": ("id_movimiento", "id_vehiculo", "fecha_salida")})
+        consultar("espacios_inactivos_con_cliente",
+                  "SELECT id_espacio FROM espacios WHERE COALESCE(activo,0)<>1 AND id_cliente IS NOT NULL",
+                  {"espacios": ("id_espacio", "activo", "id_cliente")})
+        consultar("contratos_activos_o_pendientes_sin_cochera_disponible",
+                  "SELECT cc.id_contrato,cc.id_espacio FROM cochera_contratos cc "
+                  "JOIN espacios e ON e.id_espacio=cc.id_espacio "
+                  "WHERE (cc.activo=1 OR COALESCE(cc.en_historial,0)=0) "
+                  "AND (COALESCE(e.activo,0)<>1 OR COALESCE(e.es_reservado,0)<>1)",
+                  {"cochera_contratos": ("id_contrato", "id_espacio", "activo", "en_historial"),
+                   "espacios": ("id_espacio", "activo", "es_reservado")})
+        consultar("movimientos_abiertos_sin_espacio_disponible",
+                  "SELECT m.id_movimiento,m.id_espacio FROM movimientos m "
+                  "JOIN espacios e ON e.id_espacio=m.id_espacio "
+                  "WHERE m.fecha_salida IS NULL AND (COALESCE(e.activo,0)<>1 "
+                  "OR COALESCE(e.es_reservado,0)<>0 OR e.id_cliente IS NOT NULL)",
+                  {"movimientos": ("id_movimiento", "id_espacio", "fecha_salida"),
+                   "espacios": ("id_espacio", "activo", "es_reservado", "id_cliente")})
+        return conflictos
+    except DatabaseIntegrityError:
+        raise
+    except sqlite3.Error as exc:
+        raise DatabaseIntegrityError({"error_al_validar_la_base": [(str(exc),)]}) from exc
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def _comprobar_integridad_db(conn):
+    conflictos = diagnosticar_integridad_db(conn)
+    if conflictos:
+        raise DatabaseIntegrityError(conflictos)
+
+
+def _migrar_columnas_no_destructivo(cursor):
+    """Agrega estructura; no infiere vehículos, borra filas ni cambia fechas."""
+    columnas = {
+        "vehiculos": {"tipo_vehiculo": "TEXT DEFAULT 'AUTO'", "modelo": "TEXT"},
+        "cochera_contratos": {"id_vehiculo": "INTEGER REFERENCES vehiculos(id_vehiculo)",
+                               "en_historial": "INTEGER DEFAULT 0"},
+        "tarifas": {"precio_mensual": "REAL DEFAULT 0", "precio_hora_auto": "REAL",
+                    "precio_hora_moto": "REAL", "precio_hora_camioneta": "REAL",
+                    "precio_mensual_auto": "REAL", "precio_mensual_camioneta": "REAL"},
+        "movimientos": {"tipo_vehiculo": "TEXT DEFAULT 'AUTO'",
+                        "id_tarifa_aplicada": "INTEGER REFERENCES tarifas(id_tarifa)",
+                        "tarifa_hora_aplicada": "REAL"},
+        "pagos": {"ref_externa": "TEXT", "usuario": "TEXT"},
+        "pagos_cochera": {"ref_externa": "TEXT", "usuario": "TEXT"},
+    }
+    for tabla, nuevas in columnas.items():
+        presentes = _columnas_tabla(cursor.connection, tabla)
+        for nombre, declaracion in nuevas.items():
+            if nombre not in presentes:
+                cursor.execute(f'ALTER TABLE "{tabla}" ADD COLUMN "{nombre}" {declaracion}')
+    for nombre, tabla, campos in (
+        ("idx_vehiculos_tipo", "vehiculos", "tipo_vehiculo"),
+        ("idx_contratos_vehiculo_activo", "cochera_contratos", "id_vehiculo, activo"),
+        ("idx_contratos_historial", "cochera_contratos", "en_historial, activo"),
+        ("idx_movimientos_tarifa", "movimientos", "id_tarifa_aplicada"),
+        ("idx_pagos_ref_externa", "pagos", "ref_externa"),
+        ("idx_pagos_usuario_fecha", "pagos", "usuario, fecha_pago"),
+        ("idx_pagos_cochera_ref_externa", "pagos_cochera", "ref_externa"),
+        ("idx_pagos_cochera_usuario_fecha", "pagos_cochera", "usuario, fecha_pago"),
+    ):
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS {nombre} ON {tabla} ({campos})")
+    cursor.execute("DROP TRIGGER IF EXISTS trg_contrato_activo_cliente_insert")
+    cursor.execute("DROP TRIGGER IF EXISTS trg_contrato_activo_cliente_update")
+
+
+def _instalar_guardias_integridad(cursor):
+    # SQL dentro de la transacción de init_db; execute no hace commits implícitos.
+    def proteger_lugar(nombre, evento, tabla, condicion, lookup):
+        cursor.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS {nombre}
+            BEFORE {evento} ON {tabla} {condicion}
+            BEGIN
+                SELECT RAISE(ABORT,'espacio_tiene_cliente_asignado')
+                WHERE EXISTS (SELECT 1 FROM espacios e WHERE {lookup} AND e.id_cliente IS NOT NULL);
+                SELECT RAISE(ABORT,'espacio_tiene_contrato_activo')
+                WHERE EXISTS (SELECT 1 FROM cochera_contratos cc JOIN espacios e ON e.id_espacio=cc.id_espacio
+                              WHERE {lookup} AND cc.activo=1);
+                SELECT RAISE(ABORT,'espacio_tiene_contrato_pendiente')
+                WHERE EXISTS (SELECT 1 FROM cochera_contratos cc JOIN espacios e ON e.id_espacio=cc.id_espacio
+                              WHERE {lookup} AND COALESCE(cc.activo,0)<>1 AND COALESCE(cc.en_historial,0)=0);
+                SELECT RAISE(ABORT,'espacio_tiene_movimiento_abierto')
+                WHERE EXISTS (SELECT 1 FROM movimientos m JOIN espacios e ON e.id_espacio=m.id_espacio
+                              WHERE {lookup} AND m.fecha_salida IS NULL);
+            END
+        """)
+
+    proteger_lugar("trg_espacio_borrado_protegido_v2", "DELETE", "espacios", "", "e.id_espacio=OLD.id_espacio")
+    proteger_lugar("trg_espacio_desactivacion_protegida_v2", "UPDATE OF activo", "espacios",
+                   "WHEN COALESCE(NEW.activo,0)<>1", "e.id_espacio=OLD.id_espacio")
+    proteger_lugar("trg_mapa_borrado_protegido_v2", "DELETE", "espacios_mapa", "", "e.codigo=OLD.codigo")
+
+    for evento, sufijo, excluir in (("INSERT", "insert", ""),
+                                   ("UPDATE", "update", "AND m.id_movimiento<>NEW.id_movimiento")):
+        cursor.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_movimiento_espacio_integridad_{sufijo}_v2
+            BEFORE {evento} ON movimientos WHEN NEW.fecha_salida IS NULL
+            BEGIN
+                SELECT RAISE(ABORT,'espacio_ya_tiene_movimiento_activo')
+                WHERE EXISTS (SELECT 1 FROM movimientos m WHERE m.id_espacio=NEW.id_espacio
+                              AND m.fecha_salida IS NULL {excluir});
+                SELECT RAISE(ABORT,'espacio_ya_tiene_contrato_activo')
+                WHERE EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=NEW.id_espacio AND cc.activo=1);
+                SELECT RAISE(ABORT,'vehiculo_ya_tiene_contrato_activo')
+                WHERE EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_vehiculo=NEW.id_vehiculo AND cc.activo=1);
+                SELECT RAISE(ABORT,'espacio_no_disponible_para_estacionamiento')
+                WHERE EXISTS (SELECT 1 FROM espacios e WHERE e.id_espacio=NEW.id_espacio
+                              AND (COALESCE(e.activo,0)<>1 OR COALESCE(e.es_reservado,0)<>0 OR e.id_cliente IS NOT NULL));
+            END
+        """)
+    for evento, sufijo in (("INSERT", "insert"), ("UPDATE", "update")):
+        cursor.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS trg_contrato_espacio_integridad_{sufijo}_v2
+            BEFORE {evento} ON cochera_contratos
+            WHEN NEW.activo=1 OR COALESCE(NEW.en_historial,0)=0
+            BEGIN
+                SELECT RAISE(ABORT,'espacio_no_es_cochera')
+                WHERE EXISTS (SELECT 1 FROM espacios e WHERE e.id_espacio=NEW.id_espacio
+                              AND (COALESCE(e.activo,0)<>1 OR COALESCE(e.es_reservado,0)<>1));
+                SELECT RAISE(ABORT,'espacio_tiene_movimiento_abierto')
+                WHERE NEW.activo=1 AND EXISTS (SELECT 1 FROM movimientos m
+                                              WHERE m.id_espacio=NEW.id_espacio AND m.fecha_salida IS NULL);
+                SELECT RAISE(ABORT,'vehiculo_ya_tiene_movimiento_activo')
+                WHERE NEW.activo=1 AND EXISTS (SELECT 1 FROM movimientos m
+                                              WHERE m.id_vehiculo=NEW.id_vehiculo AND m.fecha_salida IS NULL);
+            END
+        """)
+    cursor.execute("""
+        CREATE TRIGGER IF NOT EXISTS trg_espacio_clasificacion_protegida_v2
+        BEFORE UPDATE OF es_reservado,id_cliente ON espacios
+        BEGIN
+            SELECT RAISE(ABORT,'espacio_tiene_movimiento_abierto')
+            WHERE (COALESCE(NEW.es_reservado,0)<>0 OR NEW.id_cliente IS NOT NULL)
+              AND EXISTS (SELECT 1 FROM movimientos m WHERE m.id_espacio=OLD.id_espacio AND m.fecha_salida IS NULL);
+            SELECT RAISE(ABORT,'espacio_tiene_contrato_activo')
+            WHERE COALESCE(NEW.es_reservado,0)<>1
+              AND EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=OLD.id_espacio AND cc.activo=1);
+            SELECT RAISE(ABORT,'espacio_tiene_contrato_pendiente')
+            WHERE COALESCE(NEW.es_reservado,0)<>1
+              AND EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=OLD.id_espacio
+                          AND COALESCE(cc.activo,0)<>1 AND COALESCE(cc.en_historial,0)=0);
+        END
+    """)
 
 
 def _configurar_conexion(conn):
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA foreign_keys = ON")
-    except sqlite3.Error:
-        pass
-    try:
-        conn.execute("PRAGMA busy_timeout = 5000")
-    except sqlite3.Error:
-        pass
+    conn.execute("PRAGMA foreign_keys = ON")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise DatabaseIntegrityError({"claves_foraneas_deshabilitadas": [(1,)]})
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -28,7 +257,11 @@ def get_connection():
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
-    return _configurar_conexion(conn)
+    try:
+        return _configurar_conexion(conn)
+    except BaseException:
+        conn.close()
+        raise
 
 
 def validar_integridad_db(conn=None):
@@ -37,197 +270,49 @@ def validar_integridad_db(conn=None):
         conn = conn or get_connection()
         cur = conn.cursor()
         return [tuple(row) for row in cur.execute("PRAGMA foreign_key_check").fetchall()]
-    except sqlite3.Error:
-        return []
     finally:
         if own_conn and conn:
             conn.close()
 
 
 def reparar_integridad_db(conn=None):
-    own_conn = conn is None
-    reparaciones = {}
+    """Compatibilidad: informa conflictos sin corregir ni eliminar registros.
+
+    Una reparación exige revisar el diagnóstico y un respaldo; nunca se infieren
+    propietarios, vehículos o zonas horarias automáticamente.
+    """
+    conflictos = diagnosticar_integridad_db(conn)
+    return {"conflictos": conflictos,
+            "violaciones_restantes": sum(len(filas) for filas in conflictos.values())}
+
+
+def init_db(db_path=None):
+    """Inicializa atómicamente la base actual o una candidata, sin cambiar DB_PATH."""
+    if db_path is None:
+        conn = get_connection()
+    else:
+        candidate = Path(db_path).expanduser().resolve()
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(candidate))
     try:
-        conn = conn or get_connection()
-        cur = conn.cursor()
-        operaciones = [
-            (
-                "vehiculos_sin_cliente",
-                "UPDATE vehiculos "
-                "SET id_cliente = NULL "
-                "WHERE id_cliente IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM clientes c WHERE c.id_cliente = vehiculos.id_cliente"
-                ")",
-            ),
-            (
-                "contratos_vehiculo_invalido",
-                "UPDATE cochera_contratos "
-                "SET id_vehiculo = NULL "
-                "WHERE id_vehiculo IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM vehiculos v "
-                "WHERE v.id_vehiculo = cochera_contratos.id_vehiculo "
-                "AND v.id_cliente = cochera_contratos.id_cliente"
-                ")",
-            ),
-            (
-                "contratos_sin_vehiculo",
-                "UPDATE cochera_contratos "
-                "SET id_vehiculo = ("
-                "SELECT v.id_vehiculo FROM vehiculos v "
-                "WHERE v.id_cliente = cochera_contratos.id_cliente "
-                "ORDER BY v.patente LIMIT 1"
-                ") "
-                "WHERE id_vehiculo IS NULL",
-            ),
-            (
-                "espacios_sin_cliente",
-                "UPDATE espacios "
-                "SET id_cliente = NULL "
-                "WHERE id_cliente IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM clientes c WHERE c.id_cliente = espacios.id_cliente"
-                ")",
-            ),
-            (
-                "pagos_sin_movimiento",
-                "DELETE FROM pagos "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM movimientos m WHERE m.id_movimiento = pagos.id_movimiento"
-                ")",
-            ),
-            (
-                "pagos_cochera_sin_contrato",
-                "DELETE FROM pagos_cochera "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM cochera_contratos cc "
-                "WHERE cc.id_contrato = pagos_cochera.id_contrato"
-                ")",
-            ),
-            (
-                "pagos_movimientos_invalidos",
-                "DELETE FROM pagos "
-                "WHERE id_movimiento IN ("
-                "SELECT m.id_movimiento "
-                "FROM movimientos m "
-                "LEFT JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
-                "LEFT JOIN espacios e ON e.id_espacio = m.id_espacio "
-                "WHERE v.id_vehiculo IS NULL OR e.id_espacio IS NULL"
-                ")",
-            ),
-            (
-                "movimientos_invalidos",
-                "DELETE FROM movimientos "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM vehiculos v WHERE v.id_vehiculo = movimientos.id_vehiculo"
-                ") "
-                "OR NOT EXISTS ("
-                "SELECT 1 FROM espacios e WHERE e.id_espacio = movimientos.id_espacio"
-                ")",
-            ),
-            (
-                "movimientos_tarifa_invalida",
-                "UPDATE movimientos "
-                "SET id_tarifa_aplicada = NULL "
-                "WHERE id_tarifa_aplicada IS NOT NULL "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM tarifas t "
-                "WHERE t.id_tarifa = movimientos.id_tarifa_aplicada"
-                ")",
-            ),
-            (
-                "pagos_contratos_invalidos",
-                "DELETE FROM pagos_cochera "
-                "WHERE id_contrato IN ("
-                "SELECT cc.id_contrato "
-                "FROM cochera_contratos cc "
-                "LEFT JOIN clientes c ON c.id_cliente = cc.id_cliente "
-                "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
-                "WHERE c.id_cliente IS NULL OR e.id_espacio IS NULL"
-                ")",
-            ),
-            (
-                "contratos_invalidos",
-                "DELETE FROM cochera_contratos "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM clientes c WHERE c.id_cliente = cochera_contratos.id_cliente"
-                ") "
-                "OR NOT EXISTS ("
-                "SELECT 1 FROM espacios e WHERE e.id_espacio = cochera_contratos.id_espacio"
-                ")",
-            ),
-            (
-                "espacios_mapa_invalidos",
-                "DELETE FROM espacios_mapa "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM espacios e WHERE e.codigo = espacios_mapa.codigo"
-                ")",
-            ),
-            (
-                "pagos_sin_movimiento_post",
-                "DELETE FROM pagos "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM movimientos m WHERE m.id_movimiento = pagos.id_movimiento"
-                ")",
-            ),
-            (
-                "pagos_cochera_sin_contrato_post",
-                "DELETE FROM pagos_cochera "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM cochera_contratos cc "
-                "WHERE cc.id_contrato = pagos_cochera.id_contrato"
-                ")",
-            ),
-        ]
-        for clave, sql in operaciones:
-            cur.execute(sql)
-            reparaciones[clave] = max(0, int(cur.rowcount or 0))
+        if db_path is not None:
+            _configurar_conexion(conn)
+        # Diagnóstico previo: si hay datos incompatibles no se modifica ni el esquema.
+        _comprobar_integridad_db(conn)
+        _crear_esquema_y_migrar(conn)
         conn.commit()
-        reparaciones["violaciones_restantes"] = len(validar_integridad_db(conn))
-        return reparaciones
-    except sqlite3.Error:
-        if conn:
-            conn.rollback()
-        reparaciones["violaciones_restantes"] = -1
-        return reparaciones
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
-        if own_conn and conn:
-            conn.close()
+        conn.close()
 
 
-def _migrar_fechas_pagos_cochera_utc_a_local(cursor):
-    try:
-        cursor.execute(
-            "SELECT valor FROM configuracion "
-            "WHERE clave = 'migracion_pagos_cochera_local_v1'"
-        )
-        row = cursor.fetchone()
-        if row and str(row["valor"] or "").strip() == "1":
-            return
-        offset = datetime.now().astimezone().utcoffset()
-        offset_min = int((offset.total_seconds() // 60) if offset else 0)
-        if offset_min:
-            cursor.execute(
-                "UPDATE pagos_cochera "
-                "SET fecha_pago = datetime(fecha_pago, ?) "
-                "WHERE fecha_pago IS NOT NULL AND TRIM(fecha_pago) <> ''",
-                (f"{offset_min:+d} minutes",),
-            )
-        cursor.execute(
-            "INSERT INTO configuracion (clave, valor) VALUES (?, ?) "
-            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
-            ("migracion_pagos_cochera_local_v1", "1"),
-        )
-    except sqlite3.Error:
-        pass
-
-
-def init_db():
-    conn = get_connection()
+def _crear_esquema_y_migrar(conn):
     cursor = conn.cursor()
 
     cursor.executescript("""
+    BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS usuarios (
         id_usuario INTEGER PRIMARY KEY AUTOINCREMENT,
         usuario TEXT NOT NULL UNIQUE,
@@ -503,239 +588,11 @@ def init_db():
     END;
     """)
 
-    try:
-        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_mensual REAL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE vehiculos ADD COLUMN tipo_vehiculo TEXT DEFAULT 'AUTO'")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "UPDATE vehiculos "
-            "SET tipo_vehiculo = CASE "
-            "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, ''))) IN ('MOTO', 'MOTOCICLETA') THEN 'MOTO' "
-            "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, ''))) IN ('CAMIONETA', 'PICKUP') THEN 'CAMIONETA' "
-            "ELSE 'AUTO' END"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_vehiculos_tipo "
-            "ON vehiculos (tipo_vehiculo)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "ALTER TABLE cochera_contratos "
-            "ADD COLUMN id_vehiculo INTEGER REFERENCES vehiculos(id_vehiculo)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "UPDATE cochera_contratos "
-            "SET id_vehiculo = ("
-            "SELECT v.id_vehiculo FROM vehiculos v "
-            "WHERE v.id_cliente = cochera_contratos.id_cliente "
-            "ORDER BY v.patente LIMIT 1"
-            ") "
-            "WHERE id_vehiculo IS NULL"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "ALTER TABLE cochera_contratos "
-            "ADD COLUMN en_historial INTEGER DEFAULT 0"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "UPDATE cochera_contratos "
-            "SET en_historial = COALESCE(en_historial, 0)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_contratos_vehiculo_activo "
-            "ON cochera_contratos (id_vehiculo, activo)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_contratos_historial "
-            "ON cochera_contratos (en_historial, activo)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_hora_auto REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_hora_moto REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_hora_camioneta REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_mensual_auto REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE tarifas ADD COLUMN precio_mensual_camioneta REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "UPDATE tarifas SET "
-            "precio_hora_auto = COALESCE(precio_hora_auto, precio_hora), "
-            "precio_hora_moto = COALESCE(precio_hora_moto, precio_hora), "
-            "precio_hora_camioneta = COALESCE(precio_hora_camioneta, precio_hora), "
-            "precio_mensual_auto = COALESCE(precio_mensual_auto, precio_mensual), "
-            "precio_mensual_camioneta = COALESCE(precio_mensual_camioneta, precio_mensual)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE movimientos ADD COLUMN tipo_vehiculo TEXT DEFAULT 'AUTO'")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "ALTER TABLE movimientos "
-            "ADD COLUMN id_tarifa_aplicada INTEGER REFERENCES tarifas(id_tarifa)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE movimientos ADD COLUMN tarifa_hora_aplicada REAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "UPDATE movimientos "
-            "SET tipo_vehiculo = COALESCE(NULLIF(TRIM(tipo_vehiculo), ''), 'AUTO')"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_movimientos_tarifa "
-            "ON movimientos (id_tarifa_aplicada)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "SELECT id_tarifa, precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
-            "FROM tarifas WHERE activa = 1 ORDER BY fecha_desde DESC LIMIT 1"
-        )
-        tarifa_activa = cursor.fetchone()
-        if tarifa_activa:
-            tarifa_id = int(tarifa_activa["id_tarifa"])
-            cursor.execute(
-                "UPDATE movimientos "
-                "SET id_tarifa_aplicada = COALESCE(id_tarifa_aplicada, ?), "
-                "tarifa_hora_aplicada = COALESCE("
-                "tarifa_hora_aplicada, "
-                "CASE "
-                "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, 'AUTO'))) = 'MOTO' "
-                "THEN COALESCE(?, ?, 0) "
-                "WHEN UPPER(TRIM(COALESCE(tipo_vehiculo, 'AUTO'))) = 'CAMIONETA' "
-                "THEN COALESCE(?, ?, 0) "
-                "ELSE COALESCE(?, ?, 0) "
-                "END"
-                ") "
-                "WHERE fecha_salida IS NULL "
-                "AND (id_tarifa_aplicada IS NULL OR tarifa_hora_aplicada IS NULL)",
-                (
-                    tarifa_id,
-                    tarifa_activa["precio_hora_moto"],
-                    tarifa_activa["precio_hora"],
-                    tarifa_activa["precio_hora_camioneta"],
-                    tarifa_activa["precio_hora"],
-                    tarifa_activa["precio_hora_auto"],
-                    tarifa_activa["precio_hora"],
-                ),
-            )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE vehiculos ADD COLUMN modelo TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("DROP TRIGGER IF EXISTS trg_contrato_activo_cliente_insert")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("DROP TRIGGER IF EXISTS trg_contrato_activo_cliente_update")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE pagos ADD COLUMN ref_externa TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE pagos ADD COLUMN usuario TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE pagos_cochera ADD COLUMN ref_externa TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE pagos_cochera ADD COLUMN usuario TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pagos_ref_externa "
-            "ON pagos (ref_externa)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pagos_usuario_fecha "
-            "ON pagos (usuario, fecha_pago)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pagos_cochera_ref_externa "
-            "ON pagos_cochera (ref_externa)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pagos_cochera_usuario_fecha "
-            "ON pagos_cochera (usuario, fecha_pago)"
-        )
-    except sqlite3.OperationalError:
-        pass
-    _migrar_fechas_pagos_cochera_utc_a_local(cursor)
-
-    reparar_integridad_db(conn=conn)
-    try:
-        cursor.execute("PRAGMA optimize")
-    except sqlite3.Error:
-        pass
-
-    conn.commit()
-    conn.close()
+    _migrar_columnas_no_destructivo(cursor)
+    _comprobar_integridad_db(conn)
+    _instalar_guardias_integridad(cursor)
+    cursor.execute(f"PRAGMA application_id = {APPLICATION_ID}")
+    cursor.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def reset_db():
@@ -760,6 +617,10 @@ def reset_db():
             "usuarios",
         ]
         for tabla in tablas:
+            if tabla == "espacios_mapa":
+                # Sólo el reset explícito: contratos y estadías ya se borraron.
+                # Liberar la asignación permite quitar el mapa con sus guardias.
+                cursor.execute("UPDATE espacios SET id_cliente = NULL")
             cursor.execute(f"DELETE FROM {tabla}")
 
         cursor.execute(
@@ -774,4 +635,3 @@ def reset_db():
         except sqlite3.Error:
             pass
         conn.close()
-

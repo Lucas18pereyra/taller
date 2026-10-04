@@ -1,3 +1,36 @@
+import math
+
+
+def normalizar_patente(texto):
+    """Identidad de patente compartida con los formularios de la aplicacion."""
+    return "".join(ch for ch in str(texto or "").strip().upper() if ch.isalnum())
+
+
+def validar_monto(valor, *, permitir_cero=False, nombre="El monto"):
+    try:
+        monto = float(valor)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{nombre} debe ser un numero valido.") from exc
+    if not math.isfinite(monto):
+        raise ValueError(f"{nombre} debe ser un numero finito.")
+    if monto < 0 or (monto == 0 and not permitir_cero):
+        comparacion = "mayor o igual a 0" if permitir_cero else "mayor a 0"
+        raise ValueError(f"{nombre} debe ser {comparacion}.")
+    return monto
+
+
+def normalizar_metodo_pago(metodo):
+    texto = str(metodo or "").strip()
+    if not texto:
+        raise ValueError("Selecciona un metodo de pago.")
+    conocidos = {"efectivo": "Efectivo", "transferencia": "Transferencia",
+                 "tarjeta": "Tarjeta", "otro": "Otro", "qr": "QR"}
+    try:
+        return conocidos[texto.casefold()]
+    except KeyError as exc:
+        raise ValueError("El metodo de pago seleccionado no es valido.") from exc
+
+
 def codigo_cochera_activa_cliente(cur, id_cliente):
     if id_cliente is None:
         return None

@@ -1,6 +1,10 @@
 import sqlite3
+import os
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from uuid import uuid4
+from contextlib import closing
 
 import database
 
@@ -21,12 +25,12 @@ def crear_backup_db(max_backups=30):
         return None
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    destino = _carpeta_backups() / f"{db_path.stem}_{ts}.db"
+    destino = _carpeta_backups() / f"{db_path.stem}_{ts}_{uuid4().hex[:8]}.db"
 
     src = None
     dst = None
     try:
-        src = sqlite3.connect(str(db_path))
+        src = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
         dst = sqlite3.connect(str(destino))
         src.backup(dst)
     finally:
@@ -66,33 +70,6 @@ def eliminar_backup_db(path_backup):
         return False
 
 
-def _reconciliar_espacios_contratos(conn):
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type='table' AND name='espacios'"
-    )
-    if not cur.fetchone():
-        return
-    cur.execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type='table' AND name='cochera_contratos'"
-    )
-    if not cur.fetchone():
-        return
-    cur.execute(
-        "UPDATE espacios "
-        "SET id_cliente = ("
-        "SELECT cc.id_cliente "
-        "FROM cochera_contratos cc "
-        "WHERE cc.id_espacio = espacios.id_espacio "
-        "AND cc.activo = 1 "
-        "ORDER BY cc.id_contrato DESC "
-        "LIMIT 1"
-        ")"
-    )
-
-
 def restaurar_backup_db(path_backup):
     carpeta = _carpeta_backups().resolve()
     backup_path = Path(path_backup).resolve()
@@ -102,33 +79,25 @@ def restaurar_backup_db(path_backup):
         return False
 
     db_path = _ruta_db().resolve()
-    src = None
-    dst = None
     try:
-        src = sqlite3.connect(str(backup_path))
-        dst = sqlite3.connect(str(db_path))
-        src.backup(dst)
-        try:
-            _reconciliar_espacios_contratos(dst)
-            dst.commit()
-        except sqlite3.Error:
-            pass
-        try:
-            dst.close()
-            dst = None
-            src.close()
-            src = None
-            database.init_db()
-        except sqlite3.Error:
-            return False
+        # Validar una COPIA antes de reemplazar los datos actuales. Una copia
+        # corrupta o incompatible no debe dejar la aplicacion a medio restaurar.
+        with TemporaryDirectory(prefix="restauracion_", dir=db_path.parent) as temporal:
+            candidato = Path(temporal) / db_path.name
+            with closing(sqlite3.connect(backup_path.as_uri() + "?mode=ro", uri=True)) as src, closing(sqlite3.connect(str(candidato))) as dst:
+                src.backup(dst)
+                if dst.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    return False
+                tablas = {r[0] for r in dst.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if not {"clientes", "vehiculos", "espacios", "movimientos"}.issubset(tablas):
+                    return False
+            database.init_db(db_path=candidato)
+            if db_path.exists():
+                crear_backup_db(max_backups=None)
+            os.replace(candidato, db_path)
         return True
-    except sqlite3.Error:
+    except (sqlite3.Error, OSError):
         return False
-    finally:
-        if dst:
-            dst.close()
-        if src:
-            src.close()
 
 
 def _limpiar_backups_antiguos(stem, max_backups=30):

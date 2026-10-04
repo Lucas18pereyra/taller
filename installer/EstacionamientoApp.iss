@@ -1,5 +1,5 @@
 #define AppName "Estacionamiento App"
-#define AppVersion "1.2.0"
+#define AppVersion "1.4.9"
 #define AppPublisher "Lucas"
 #define AppExeName "EstacionamientoApp.exe"
 
@@ -8,7 +8,9 @@ AppId={{A4F17D7C-1D6C-44A8-9D65-EEA4F2CA6D25}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
-DefaultDirName={autopf}\{#AppName}
+; The portable app keeps its database beside the executable: use a writable path.
+DefaultDirName={localappdata}\Programs\{#AppName}
+PrivilegesRequired=lowest
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist_installer

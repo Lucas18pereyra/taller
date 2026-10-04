@@ -6,6 +6,9 @@ from database import get_connection
 from servicios.validaciones import (
     cliente_tiene_movimiento_activo,
     espacio_tiene_movimiento_activo,
+    normalizar_metodo_pago,
+    normalizar_patente,
+    validar_monto,
 )
 
 
@@ -19,7 +22,7 @@ def _normalizar_tipo_vehiculo(tipo):
 
 
 def _normalizar_patente(texto):
-    return "".join(str(texto or "").upper().split())
+    return normalizar_patente(texto)
 
 
 def _fecha_pago_db(fecha_pago=None):
@@ -219,10 +222,10 @@ def obtener_detalle_contrato(id_contrato):
 
 
 def _parse_date(valor):
-    if isinstance(valor, date):
-        return valor
     if isinstance(valor, datetime):
         return valor.date()
+    if isinstance(valor, date):
+        return valor
     texto = str(valor or "").strip()
     if not texto:
         return None
@@ -243,10 +246,19 @@ def _add_months(base_date, months):
     return date(y, m, d)
 
 
+def _validar_meses(meses):
+    try:
+        numero = float(meses)
+        entero = int(numero)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("Los meses deben ser un numero entero de 1 o mas.") from exc
+    if numero != entero or entero < 1:
+        raise ValueError("Los meses deben ser un numero entero de 1 o mas.")
+    return entero
+
+
 def calcular_nueva_fecha_vencimiento(fecha_vencimiento, meses, hoy=None):
-    meses = int(meses or 0)
-    if meses < 1:
-        raise ValueError("Los meses deben ser 1 o mas.")
+    meses = _validar_meses(meses)
 
     fecha_venc = _parse_date(fecha_vencimiento)
     hoy_date = _parse_date(hoy) or date.today()
@@ -262,16 +274,18 @@ def registrar_primer_pago_contrato(
     usuario=None,
     fecha_pago=None,
 ):
-    monto = float(monto or 0.0)
-    if monto <= 0:
-        raise ValueError("El monto debe ser mayor a 0.")
+    monto = validar_monto(monto)
+    metodo = normalizar_metodo_pago(metodo)
+    fecha_pago_db = _fecha_pago_db(fecha_pago)
 
     conn = None
     try:
         conn = get_connection()
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
         cur.execute(
-            "SELECT id_espacio, id_cliente, id_vehiculo, activo, fecha_vencimiento "
+            "SELECT id_espacio, id_cliente, id_vehiculo, activo, fecha_vencimiento, "
+            "COALESCE(en_historial, 0) AS en_historial "
             "FROM cochera_contratos WHERE id_contrato = ?",
             (id_contrato,),
         )
@@ -280,8 +294,12 @@ def registrar_primer_pago_contrato(
             raise ValueError("Contrato no encontrado.")
         if int(row["activo"] or 0) == 1:
             raise ValueError("El contrato ya esta ACTIVO.")
+        if int(row["en_historial"] or 0) == 1:
+            raise ValueError("El contrato esta en historial. Reactivalo antes de registrar un pago.")
         fecha_venc = _parse_date(row["fecha_vencimiento"])
-        if fecha_venc and fecha_venc < date.today():
+        if not fecha_venc:
+            raise ValueError("El contrato no tiene una fecha de vencimiento valida.")
+        if fecha_venc < date.today():
             raise ValueError(
                 "El contrato esta vencido. Ajusta el vencimiento antes de activar."
             )
@@ -291,13 +309,18 @@ def registrar_primer_pago_contrato(
         id_vehiculo = row["id_vehiculo"]
         if id_espacio:
             cur.execute(
-                "SELECT codigo, COALESCE(es_reservado, 0) AS es_reservado "
+                "SELECT codigo, COALESCE(es_reservado, 0) AS es_reservado, "
+                "COALESCE(activo, 0) AS activo, id_cliente "
                 "FROM espacios WHERE id_espacio = ?",
                 (id_espacio,),
             )
             row_esp = cur.fetchone()
             if not row_esp:
                 raise ValueError("El espacio asociado al contrato ya no existe.")
+            if int(row_esp["activo"] or 0) != 1:
+                raise ValueError("El espacio asociado al contrato esta desactivado.")
+            if row_esp["id_cliente"] not in (None, id_cliente):
+                raise ValueError("El espacio asociado al contrato pertenece a otro cliente.")
             if int(row_esp["es_reservado"] or 0) != 1:
                 raise ValueError(
                     f"El espacio {row_esp['codigo'] or '-'} ya no esta marcado como cochera en el mapa."
@@ -322,7 +345,9 @@ def registrar_primer_pago_contrato(
                 raise ValueError("La patente asociada al contrato ya no existe.")
             if id_cliente and int(row_pat["id_cliente"] or 0) != int(id_cliente):
                 raise ValueError("La patente asociada no pertenece a ese cliente.")
-            patente_principal = (row_pat["patente"] or "").strip().upper()
+            patente_principal = _normalizar_patente(row_pat["patente"])
+            if not patente_principal:
+                raise ValueError("La patente asociada al contrato esta vacia.")
         elif id_cliente:
             cur.execute(
                 "SELECT id_vehiculo, patente FROM vehiculos "
@@ -334,7 +359,7 @@ def registrar_primer_pago_contrato(
             if not row_pat:
                 raise ValueError("Este cliente no tiene ninguna patente a su nombre.")
             id_vehiculo = row_pat["id_vehiculo"]
-            patente_principal = (row_pat["patente"] or "").strip().upper()
+            patente_principal = _normalizar_patente(row_pat["patente"])
             cur.execute(
                 "UPDATE cochera_contratos SET id_vehiculo = ? WHERE id_contrato = ?",
                 (id_vehiculo, id_contrato),
@@ -415,7 +440,7 @@ def registrar_primer_pago_contrato(
                 metodo,
                 (ref_externa or "").strip() or None,
                 (usuario or "").strip() or None,
-                _fecha_pago_db(fecha_pago),
+                fecha_pago_db,
             ),
         )
         cur.execute(
@@ -448,16 +473,15 @@ def registrar_renovacion_contrato(
     usuario=None,
     fecha_pago=None,
 ):
-    meses = int(meses or 0)
-    monto = float(monto or 0.0)
-    if meses < 1:
-        raise ValueError("Los meses deben ser 1 o mas.")
-    if monto <= 0:
-        raise ValueError("El monto debe ser mayor a 0.")
+    meses = _validar_meses(meses)
+    monto = validar_monto(monto)
+    metodo = normalizar_metodo_pago(metodo)
+    fecha_pago_db = _fecha_pago_db(fecha_pago)
 
     conn = None
     try:
         conn = get_connection()
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
         cur.execute(
             "SELECT fecha_vencimiento, activo, id_cliente, id_espacio "
@@ -473,13 +497,18 @@ def registrar_renovacion_contrato(
         id_espacio = row["id_espacio"] if "id_espacio" in row.keys() else None
         if id_espacio:
             cur.execute(
-                "SELECT codigo, COALESCE(es_reservado, 0) AS es_reservado "
+                "SELECT codigo, COALESCE(es_reservado, 0) AS es_reservado, "
+                "COALESCE(activo, 0) AS activo, id_cliente "
                 "FROM espacios WHERE id_espacio = ?",
                 (id_espacio,),
             )
             row_esp = cur.fetchone()
             if not row_esp:
                 raise ValueError("El espacio asociado al contrato ya no existe.")
+            if int(row_esp["activo"] or 0) != 1:
+                raise ValueError("El espacio asociado al contrato esta desactivado.")
+            if row_esp["id_cliente"] not in (None, id_cliente):
+                raise ValueError("El espacio asociado al contrato pertenece a otro cliente.")
             if int(row_esp["es_reservado"] or 0) != 1:
                 raise ValueError(
                     f"El espacio {row_esp['codigo'] or '-'} ya no esta marcado como cochera en el mapa."
@@ -508,7 +537,7 @@ def registrar_renovacion_contrato(
                 metodo,
                 (ref_externa or "").strip() or None,
                 (usuario or "").strip() or None,
-                _fecha_pago_db(fecha_pago),
+                fecha_pago_db,
             ),
         )
         cur.execute(
@@ -527,6 +556,7 @@ def reactivar_contrato_desde_historial(id_contrato, hoy=None):
     conn = None
     try:
         conn = get_connection()
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
         cur.execute(
             "SELECT id_cliente, fecha_vencimiento, COALESCE(en_historial, 0) AS en_historial "

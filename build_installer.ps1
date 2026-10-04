@@ -12,7 +12,7 @@ if (-not (Test-Path $IssPath)) {
 
 if ([string]::IsNullOrWhiteSpace($InnoCompiler)) {
     $candidatos = @(
-        "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
         "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
     )
     foreach ($c in $candidatos) {

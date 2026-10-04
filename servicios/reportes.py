@@ -23,7 +23,7 @@ def consultar_resumen(mes_key):
         )
         estacionamiento = float(cur.fetchone()[0] or 0.0)
     except sqlite3.Error:
-        pass
+        raise
     finally:
         if conn:
             conn.close()
@@ -50,7 +50,7 @@ def consultar_resumen_rango(desde_key, hasta_key):
         )
         estacionamiento = float(cur.fetchone()[0] or 0.0)
     except sqlite3.Error:
-        pass
+        raise
     finally:
         if conn:
             conn.close()
@@ -68,11 +68,15 @@ def consultar_detalle(mes_key):
             "COALESCE(pc.usuario, '') AS usuario, "
             "COALESCE(c.nombre, '') AS nombre, "
             "COALESCE(e.codigo, '') AS codigo, "
+            "COALESCE(v_sel.patente, (SELECT v.patente FROM vehiculos v "
+            "WHERE v.id_cliente = c.id_cliente ORDER BY v.patente LIMIT 1), '') AS patente, "
+            "COALESCE(v_sel.tipo_vehiculo, '') AS tipo_vehiculo, "
             "pc.id_contrato "
             "FROM pagos_cochera pc "
             "LEFT JOIN cochera_contratos cc ON cc.id_contrato = pc.id_contrato "
             "LEFT JOIN clientes c ON c.id_cliente = cc.id_cliente "
             "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
+            "LEFT JOIN vehiculos v_sel ON v_sel.id_vehiculo = cc.id_vehiculo "
             "WHERE strftime('%Y-%m', pc.fecha_pago) = ? "
             "ORDER BY pc.fecha_pago DESC",
             (mes_key,),
@@ -87,11 +91,11 @@ def consultar_detalle(mes_key):
                     "metodo": row["metodo"],
                     "usuario": row["usuario"] or "",
                     "cliente": row["nombre"] or "",
-                    "patente": "",
+                    "patente": row["patente"] or "",
                     "espacio": row["codigo"] or "",
                     "contrato_id": row["id_contrato"],
                     "movimiento_id": "",
-                    "tipo_vehiculo": "",
+                    "tipo_vehiculo": row["tipo_vehiculo"] or "",
                 }
             )
 
@@ -128,7 +132,7 @@ def consultar_detalle(mes_key):
                 }
             )
     except sqlite3.Error:
-        pass
+        raise
     finally:
         if conn:
             conn.close()
@@ -146,11 +150,15 @@ def consultar_detalle_rango(desde_key, hasta_key):
             "COALESCE(pc.usuario, '') AS usuario, "
             "COALESCE(c.nombre, '') AS nombre, "
             "COALESCE(e.codigo, '') AS codigo, "
+            "COALESCE(v_sel.patente, (SELECT v.patente FROM vehiculos v "
+            "WHERE v.id_cliente = c.id_cliente ORDER BY v.patente LIMIT 1), '') AS patente, "
+            "COALESCE(v_sel.tipo_vehiculo, '') AS tipo_vehiculo, "
             "pc.id_contrato "
             "FROM pagos_cochera pc "
             "LEFT JOIN cochera_contratos cc ON cc.id_contrato = pc.id_contrato "
             "LEFT JOIN clientes c ON c.id_cliente = cc.id_cliente "
             "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
+            "LEFT JOIN vehiculos v_sel ON v_sel.id_vehiculo = cc.id_vehiculo "
             "WHERE date(pc.fecha_pago) BETWEEN date(?) AND date(?) "
             "ORDER BY pc.fecha_pago DESC",
             (desde_key, hasta_key),
@@ -165,11 +173,11 @@ def consultar_detalle_rango(desde_key, hasta_key):
                     "metodo": row["metodo"],
                     "usuario": row["usuario"] or "",
                     "cliente": row["nombre"] or "",
-                    "patente": "",
+                    "patente": row["patente"] or "",
                     "espacio": row["codigo"] or "",
                     "contrato_id": row["id_contrato"],
                     "movimiento_id": "",
-                    "tipo_vehiculo": "",
+                    "tipo_vehiculo": row["tipo_vehiculo"] or "",
                 }
             )
 
@@ -206,7 +214,7 @@ def consultar_detalle_rango(desde_key, hasta_key):
                 }
             )
     except sqlite3.Error:
-        pass
+        raise
     finally:
         if conn:
             conn.close()
@@ -225,12 +233,13 @@ def consultar_pagos_mensuales_rango(desde_key, hasta_key):
             "COALESCE(c.dni, '') AS dni, "
             "COALESCE(e.codigo, '') AS codigo, "
             "pc.id_contrato, "
-            "(SELECT v.patente FROM vehiculos v "
-            " WHERE v.id_cliente = c.id_cliente ORDER BY v.patente LIMIT 1) AS patente "
+            "COALESCE(v_sel.patente, (SELECT v.patente FROM vehiculos v "
+            " WHERE v.id_cliente = c.id_cliente ORDER BY v.patente LIMIT 1), '') AS patente "
             "FROM pagos_cochera pc "
             "LEFT JOIN cochera_contratos cc ON cc.id_contrato = pc.id_contrato "
             "LEFT JOIN clientes c ON c.id_cliente = cc.id_cliente "
             "LEFT JOIN espacios e ON e.id_espacio = cc.id_espacio "
+            "LEFT JOIN vehiculos v_sel ON v_sel.id_vehiculo = cc.id_vehiculo "
             "WHERE date(pc.fecha_pago) BETWEEN date(?) AND date(?) "
             "ORDER BY pc.fecha_pago DESC",
             (desde_key, hasta_key),
@@ -250,7 +259,7 @@ def consultar_pagos_mensuales_rango(desde_key, hasta_key):
                 }
             )
     except sqlite3.Error:
-        return []
+        raise
     finally:
         if conn:
             conn.close()

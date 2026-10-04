@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.2.0",
+    [string]$Version = "1.4.9",
     [string]$CompanyName = "Lucas",
     [string]$ProductName = "Estacionamiento App",
     [switch]$Clean = $true
@@ -91,7 +91,16 @@ try {
         throw "No se genero dist\\EstacionamientoApp.exe."
     }
 
+    $launchExe = Join-Path $ProjectRoot "EstacionamientoApp.exe"
+    if (Test-Path -LiteralPath $launchExe) {
+        $releaseBackupDir = Join-Path $ProjectRoot ".respaldo_visual\ejecutables"
+        New-Item -ItemType Directory -Path $releaseBackupDir -Force | Out-Null
+        $releaseBackupName = "EstacionamientoApp-{0}-{1}.exe" -f (Get-Date -Format "yyyyMMdd-HHmmss"), ([guid]::NewGuid().ToString("N").Substring(0, 8))
+        Copy-Item -LiteralPath $launchExe -Destination (Join-Path $releaseBackupDir $releaseBackupName)
+    }
+    Copy-Item -LiteralPath $exePath -Destination $launchExe -Force
     Write-Host "Build OK: $exePath"
+    Write-Host "Acceso junto a la base existente: $launchExe"
     Write-Host "Version aplicada: $VersionText"
 }
 finally {

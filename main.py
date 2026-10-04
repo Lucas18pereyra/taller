@@ -79,10 +79,14 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QSizePolicy,
     QStyle,
+    QStyleOptionGraphicsItem,
     QMenu,
 )
 from ui_ventana_principal import Ui_MainWindow
+import database as app_database
 from database import get_connection, init_db, reset_db
+from presentacion import Presentation, prepare_dialog
+from presentacion_estilos import apply_application_theme, palette as presentation_palette
 from servicios.contratos import (
     listar_contratos as svc_listar_contratos,
     obtener_detalle_contrato as svc_obtener_detalle_contrato,
@@ -118,11 +122,19 @@ from servicios.cobro import (
     parse_fecha_db as svc_parse_fecha_db,
 )
 from servicios.validaciones import (
+    normalizar_metodo_pago as svc_normalizar_metodo_pago,
+    validar_monto as svc_validar_monto,
     cliente_tiene_movimiento_activo as svc_cliente_tiene_movimiento_activo,
     codigo_cochera_activa_cliente as svc_codigo_cochera_activa_cliente,
     espacio_tiene_movimiento_activo as svc_espacio_tiene_movimiento_activo,
     vehiculo_tiene_movimiento_activo as svc_vehiculo_tiene_movimiento_activo,
 )
+from servicios.espacios import (
+    comprobar_eliminacion as svc_comprobar_eliminacion_espacio,
+    comprobar_tipo as svc_comprobar_tipo_espacio,
+    guardar_mapa as svc_guardar_mapa,
+)
+from servicios.arranque import respaldar_antes_de_migrar
 
 
 def _usuario_desde_widget(widget):
@@ -376,6 +388,10 @@ def _traducir_botones_widget(widget):
 class _DialogTranslationFilter(QObject):
     # Engancha eventos puntuales para que la interfaz responda mejor
     def eventFilter(self, watched, event):
+        if event.type() == QEvent.Polish and isinstance(watched, (QSpinBox, QDoubleSpinBox)):
+            _configurar_spinbox_numerico(watched)
+        if event.type() == QEvent.Show and isinstance(watched, QDialog):
+            prepare_dialog(watched)
         if event.type() in (
             QEvent.Polish,
             QEvent.Show,
@@ -545,6 +561,41 @@ def _configurar_spinbox_numerico(spinbox):
         spinbox.setGroupSeparatorShown(True)
     except Exception:
         pass
+    if not spinbox.property("formatoMilesInstalado"):
+        spinbox.setProperty("formatoMilesInstalado", True)
+        editor = spinbox.lineEdit()
+        editor.textEdited.connect(lambda texto: _agrupar_numero_editado(editor, texto))
+
+
+def _agrupar_numero_editado(editor, texto, documento=False):
+    """Agrupa miles mientras se escribe, sin perder decimales ni el cursor."""
+    cursor = editor.cursorPosition()
+    digitos_izquierda = sum(c.isdigit() for c in texto[:cursor])
+    if documento:
+        formateado = _formatear_documento(texto)
+    else:
+        partes = texto.split(",", 1)
+        entero = partes[0]
+        if any(c not in "0123456789.-" for c in entero):
+            return
+        formateado = ("-" if entero.startswith("-") else "") + _formatear_documento(entero)
+        if len(partes) == 2:
+            formateado += "," + partes[1]
+    if formateado == texto:
+        return
+    editor.setText(formateado)
+    posicion = 0
+    vistos = 0
+    while posicion < len(formateado) and vistos < digitos_izquierda:
+        vistos += int(formateado[posicion].isdigit())
+        posicion += 1
+    if cursor == len(texto):
+        posicion = len(formateado)
+    editor.setCursorPosition(posicion)
+
+
+def _instalar_formato_dni(editor):
+    editor.textEdited.connect(lambda texto: _agrupar_numero_editado(editor, texto, documento=True))
 
 
 # Aplica la tolerancia para no cobrar de mas por minutos chicos
@@ -914,7 +965,7 @@ def _config_get_bool(clave, default=True):
 
 
 def _tema_claro_activo():
-    return (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower() == "claro"
+    return (_config_get("ui_tema", "claro") or "claro").strip().lower() == "claro"
 
 
 def _ui_tamano_texto():
@@ -967,6 +1018,8 @@ def _aplicar_fuente_aplicacion(app=None):
     else:
         font.setPointSize(max(10, _ui_escalar_pt(10, minimo=10)))
     app.setFont(font)
+    app._presentation_light = _tema_claro_activo()
+    apply_application_theme(app, light=app._presentation_light, scale=factor)
 
 
 def _estilo_modo_sencillo():
@@ -1233,7 +1286,8 @@ def _escritorio_base_actual():
 
 def _resolver_directorio_app(clave_config, fallback_relativo):
     valor = (_config_get(clave_config, "") or "").strip()
-    app_dir = Path(__file__).resolve().parent
+    # User files must live beside the database, not in PyInstaller's temp bundle.
+    app_dir = Path(app_database.DB_PATH).resolve().parent
     candidatos = []
 
     if valor:
@@ -1897,36 +1951,29 @@ def _eliminar_contrato_definitivo(id_contrato):
     conn = None
     try:
         conn = get_connection()
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id_espacio FROM cochera_contratos WHERE id_contrato = ?",
-            (id_contrato,),
-        )
+        cur.execute("SELECT id_espacio, id_cliente, activo FROM cochera_contratos WHERE id_contrato=?", (id_contrato,))
         row = cur.fetchone()
         if not row:
             return {"ok": False, "pagos": 0, "id_espacio": None}
-
-        id_espacio = row["id_espacio"]
-        cur.execute(
-            "SELECT COUNT(*) AS cantidad FROM pagos_cochera WHERE id_contrato = ?",
-            (id_contrato,),
-        )
-        row_pagos = cur.fetchone()
-        pagos = int((row_pagos["cantidad"] if row_pagos else 0) or 0)
-
+        if int(row["activo"] or 0) == 1:
+            raise ValueError("El contrato esta activo. Dalo de baja para conservarlo en Historial.")
+        id_espacio, id_cliente = row["id_espacio"], row["id_cliente"]
+        cur.execute("SELECT COUNT(*) FROM pagos_cochera WHERE id_contrato=?", (id_contrato,))
+        pagos = int(cur.fetchone()[0] or 0)
         if pagos > 0:
-            cur.execute(
-                "DELETE FROM pagos_cochera WHERE id_contrato = ?",
-                (id_contrato,),
-            )
-        cur.execute(
-            "DELETE FROM cochera_contratos WHERE id_contrato = ?",
-            (id_contrato,),
-        )
+            raise ValueError("Este contrato tiene pagos registrados. Se conserva en Historial para no perder los cobros ni modificar reportes de periodos anteriores.")
+        cur.execute("DELETE FROM cochera_contratos WHERE id_contrato=? AND COALESCE(activo,0)<>1", (id_contrato,))
+        if cur.rowcount != 1:
+            raise ValueError("El contrato cambio mientras se intentaba eliminarlo.")
         if id_espacio:
+            # Borrar historial antiguo no libera el lugar usado por otro cliente.
             cur.execute(
-                "UPDATE espacios SET id_cliente = NULL WHERE id_espacio = ?",
-                (id_espacio,),
+                "UPDATE espacios SET id_cliente=NULL WHERE id_espacio=? AND id_cliente=? "
+                "AND NOT EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=espacios.id_espacio AND cc.activo=1) "
+                "AND NOT EXISTS (SELECT 1 FROM movimientos m WHERE m.id_espacio=espacios.id_espacio AND m.fecha_salida IS NULL)",
+                (id_espacio, id_cliente),
             )
         conn.commit()
         return {"ok": True, "pagos": pagos, "id_espacio": id_espacio}
@@ -3363,6 +3410,7 @@ class ContratosDialog(QDialog):
         form = QFormLayout()
         self.input_dni = QLineEdit()
         self.input_dni.setMaxLength(10)
+        _instalar_formato_dni(self.input_dni)
         self.input_dni.setValidator(
             QRegularExpressionValidator(
                 QRegularExpression(r"[0-9.]{0,10}"),
@@ -3387,11 +3435,23 @@ class ContratosDialog(QDialog):
         self.input_monto.setRange(0.0, 999999.0)
         self.input_monto.setSingleStep(100.0)
         _configurar_spinbox_numerico(self.input_monto)
+        self.input_monto.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        self.input_monto.setKeyboardTracking(False)
+        self.input_monto.setToolTip("Escribe el precio mensual acordado para esta cochera.")
         form.addRow("DNI cliente", self.input_dni)
         form.addRow("Patente", self.input_patente)
         form.addRow("Modelo", self.input_modelo)
         form.addRow("Tipo vehiculo", self.input_tipo_vehiculo)
-        form.addRow("Espacio (codigo)", self.input_espacio)
+        espacio_panel = QWidget()
+        espacio_layout = QHBoxLayout(espacio_panel)
+        espacio_layout.setContentsMargins(0, 0, 0, 0)
+        espacio_layout.addWidget(self.input_espacio, 1)
+        self.input_espacio.setPlaceholderText("Automático si queda vacío")
+        self.btn_elegir_mapa = QPushButton("Mapa")
+        self.btn_elegir_mapa.setProperty("variant", "primary")
+        self.btn_elegir_mapa.clicked.connect(self._elegir_espacio_mapa)
+        espacio_layout.addWidget(self.btn_elegir_mapa)
+        form.addRow("Espacio (codigo)", espacio_panel)
         form.addRow("Vencimiento", self.input_venc)
         form.addRow("Monto mensual", self.input_monto)
         layout.addLayout(form)
@@ -3545,6 +3605,8 @@ class ContratosDialog(QDialog):
                 "SELECT codigo FROM espacios "
                 "WHERE activo = 1 AND COALESCE(es_reservado, 0) = 1 "
                 "AND id_cliente IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=espacios.id_espacio AND cc.activo=1) "
+                "AND NOT EXISTS (SELECT 1 FROM movimientos m WHERE m.id_espacio=espacios.id_espacio AND m.fecha_salida IS NULL) "
                 "ORDER BY codigo LIMIT 1"
             )
             row = cur.fetchone()
@@ -3555,6 +3617,40 @@ class ContratosDialog(QDialog):
         finally:
             if conn:
                 conn.close()
+
+    def _elegir_espacio_mapa(self):
+        dialog = MapaCocheraDialog(self, editable=False)
+        dialog.setWindowTitle("Elegir cochera para el contrato")
+        elegir = QPushButton("Elegir espacio seleccionado")
+        elegir.setProperty("variant", "primary")
+        dialog.layout().addWidget(elegir)
+
+        def confirmar():
+            items = [item for item in dialog.scene.selectedItems() if isinstance(item, EspacioItem)]
+            if len(items) != 1:
+                QMessageBox.information(dialog, "Elegir cochera", "Selecciona un espacio del mapa.")
+                return
+            codigo = items[0].codigo
+            conn = get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT codigo FROM espacios e WHERE codigo=? AND activo=1 AND es_reservado=1 AND id_cliente IS NULL "
+                    "AND NOT EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=e.id_espacio AND cc.activo=1) "
+                    "AND NOT EXISTS (SELECT 1 FROM movimientos m WHERE m.id_espacio=e.id_espacio AND m.fecha_salida IS NULL)",
+                    (codigo,)).fetchone()
+            except sqlite3.Error:
+                _mostrar_error(dialog, "Mapa", "No se pudo comprobar la disponibilidad. Intenta nuevamente.")
+                return
+            finally:
+                conn.close()
+            if not row:
+                QMessageBox.warning(dialog, "Espacio no disponible", "Elige una cochera libre, sin cliente, contrato ni vehículo dentro.")
+                return
+            self.input_espacio.setText(codigo)
+            dialog.accept()
+
+        elegir.clicked.connect(confirmar)
+        dialog.exec()
 
     def autocompletar(self):
         self._cargar_tarifa_mensual()
@@ -3651,21 +3747,22 @@ class ContratosDialog(QDialog):
             fecha_venc = vista["fecha_venc"]
             if fecha_venc.isValid():
                 dias = vista["dias"]
+                colores = presentation_palette(_tema_claro_activo())
                 if dias is not None and dias < 0:
-                    bg = QColor(127, 29, 29)
-                    fg = QColor(255, 255, 255)
+                    bg = QColor(colores["danger_soft"])
+                    fg = QColor(colores["danger"])
                     tip = f"Vencido hace {abs(dias)} dia/s"
                 elif dias == 0:
-                    bg = QColor(180, 83, 9)
-                    fg = QColor(255, 255, 255)
+                    bg = QColor(colores["warning_soft"])
+                    fg = QColor(colores["warning"])
                     tip = "Vence hoy"
                 elif dias is not None and dias <= 7:
-                    bg = QColor(202, 138, 4)
-                    fg = QColor(0, 0, 0)
+                    bg = QColor(colores["warning_soft"])
+                    fg = QColor(colores["warning"])
                     tip = f"Vence en {dias} dia/s"
                 else:
-                    bg = QColor(21, 128, 61)
-                    fg = QColor(255, 255, 255)
+                    bg = QColor(colores["success_soft"])
+                    fg = QColor(colores["success"])
                     tip = f"Vence en {dias} dia/s"
                 item_venc.setBackground(QBrush(bg))
                 item_venc.setForeground(QBrush(fg))
@@ -3853,9 +3950,11 @@ class ContratosDialog(QDialog):
             self.btn_renovar_pago.setEnabled(False)
             self.btn_baja.setEnabled(False)
             if self.btn_eliminar and self.btn_eliminar.isVisible():
-                self.btn_eliminar.setEnabled(bool(not es_activo))
+                self.btn_eliminar.setEnabled(bool(not es_activo and pagos_contrato == 0))
                 self.btn_eliminar.setToolTip(
-                    "Elimina este contrato inactivo aunque el cliente este desactivado."
+                    "Los contratos con pagos se conservan en Historial."
+                    if pagos_contrato > 0
+                    else "Elimina el contrato inactivo sin pagos aunque el cliente este desactivado."
                     if not es_activo
                     else "Primero da de baja el contrato activo para pasarlo a historial."
                 )
@@ -3873,7 +3972,7 @@ class ContratosDialog(QDialog):
         self.btn_renovar_pago.setEnabled(es_activo)
         self.btn_baja.setEnabled(es_activo)
         if self.btn_eliminar and self.btn_eliminar.isVisible():
-            self.btn_eliminar.setEnabled(not es_activo)
+            self.btn_eliminar.setEnabled(not es_activo and pagos_contrato == 0)
         if puede_avisar_vencimiento:
             self.btn_whatsapp.setToolTip(
                 "Abre WhatsApp con el aviso de vencimiento del contrato."
@@ -3898,7 +3997,7 @@ class ContratosDialog(QDialog):
             if self.btn_eliminar and self.btn_eliminar.isVisible():
                 self.btn_eliminar.setToolTip(
                     "Los contratos activos no se eliminan desde aqui.\n"
-                    "Usa 'Dar de baja' y, si hace falta, elimÃ­nalo luego desde Historial."
+                    "Usa 'Dar de baja' para conservarlo en Historial."
                 )
         else:
             self.btn_registrar_pago.setToolTip("Registra primer pago y activa el contrato.")
@@ -3906,7 +4005,9 @@ class ContratosDialog(QDialog):
             self.btn_baja.setToolTip("Disponible solo para contratos activos.")
             if self.btn_eliminar and self.btn_eliminar.isVisible():
                 self.btn_eliminar.setToolTip(
-                    "Elimina este contrato inactivo definitivamente."
+                    "Los contratos con pagos se conservan en Historial."
+                    if pagos_contrato > 0
+                    else "Elimina este contrato inactivo sin pagos."
                 )
 
     @staticmethod
@@ -4233,6 +4334,8 @@ class ContratosDialog(QDialog):
 
     def _crear_contrato(self):
         dni = self._formatear_input_dni()
+        if not self.input_espacio.text().strip():
+            self._sugerir_espacio_libre()
         codigo = self.input_espacio.text().strip().upper()
         fecha_venc = self.input_venc.date().toString("yyyy-MM-dd")
         monto = float(self.input_monto.value())
@@ -4755,13 +4858,9 @@ class ContratosDialog(QDialog):
             )
 
     def _baja(self):
-        id_contrato, id_espacio = self._selected_ids()
+        id_contrato, _id_espacio_seleccionado = self._selected_ids()
         if not id_contrato:
-            QMessageBox.warning(
-                self,
-                "Contrato",
-                "Selecciona un contrato de la lista para darlo de baja.",
-            )
+            QMessageBox.warning(self, "Contrato", "Selecciona un contrato de la lista para darlo de baja.")
             return
         if not self._validar_cliente_activo_contrato(id_contrato, "dar de baja el contrato"):
             self._actualizar_acciones_pago()
@@ -4770,47 +4869,51 @@ class ContratosDialog(QDialog):
             return
         try:
             confirmar = QMessageBox.question(
-                self,
-                "Dar de baja",
-                "Desactivar contrato y liberar espacio?",
-                QMessageBox.Yes | QMessageBox.No,
+                self, "Dar de baja", "Desactivar contrato y liberar su asignacion de espacio?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if confirmar != QMessageBox.Yes:
                 return
             conn = None
             try:
                 conn = get_connection()
+                conn.execute("BEGIN IMMEDIATE")
                 cur = conn.cursor()
                 cur.execute(
-                    "UPDATE cochera_contratos SET activo = 0, en_historial = 1 "
-                    "WHERE id_contrato = ?",
+                    "SELECT cc.id_espacio, cc.id_cliente, cc.activo, COALESCE(c.activo,0) AS cliente_activo "
+                    "FROM cochera_contratos cc JOIN clientes c ON c.id_cliente=cc.id_cliente WHERE cc.id_contrato=?",
                     (id_contrato,),
                 )
-                if id_espacio:
-                    cur.execute(
-                        "UPDATE espacios SET id_cliente = NULL WHERE id_espacio = ?",
-                        (id_espacio,),
-                    )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("El contrato ya no existe. Actualiza la lista.")
+                if int(row["activo"] or 0) != 1:
+                    raise ValueError("El contrato ya no esta activo. No se libero ningun lugar.")
+                if int(row["cliente_activo"] or 0) != 1:
+                    raise ValueError("El cliente esta desactivado. Activalo antes de dar de baja el contrato.")
+                id_espacio, id_cliente = row["id_espacio"], row["id_cliente"]
+                cur.execute("UPDATE cochera_contratos SET activo=0, en_historial=1 WHERE id_contrato=? AND activo=1", (id_contrato,))
+                if cur.rowcount != 1:
+                    raise ValueError("El contrato cambio. Actualiza la lista antes de continuar.")
+                cur.execute(
+                    "UPDATE espacios SET id_cliente=NULL WHERE id_espacio=? AND id_cliente=? "
+                    "AND NOT EXISTS (SELECT 1 FROM cochera_contratos cc WHERE cc.id_espacio=espacios.id_espacio AND cc.activo=1) "
+                    "AND NOT EXISTS (SELECT 1 FROM movimientos m WHERE m.id_espacio=espacios.id_espacio AND m.fecha_salida IS NULL)",
+                    (id_espacio, id_cliente),
+                )
                 conn.commit()
                 _auditar(self, "Contrato baja", f"ID {id_contrato}")
                 self._cargar()
-                QMessageBox.information(
-                    self,
-                    "Contrato",
-                    "Contrato dado de baja.\nAhora se encuentra en Historial.",
-                )
+                QMessageBox.information(self, "Contrato", "Contrato dado de baja. Ahora se encuentra en Historial.")
+            except ValueError as exc:
+                QMessageBox.warning(self, "Contrato", str(exc))
             except sqlite3.Error:
-                _mostrar_error(self, "Error", "No se pudo dar de baja.")
+                _mostrar_error(self, "Error", "No se pudo dar de baja. No se realizaron cambios.")
             finally:
                 if conn:
                     conn.close()
         finally:
-            _antirebote_finalizar(
-                self,
-                "contratos_baja",
-                cooldown_ms=700,
-                on_release=self._actualizar_acciones_pago,
-            )
+            _antirebote_finalizar(self, "contratos_baja", cooldown_ms=700, on_release=self._actualizar_acciones_pago)
 
     def _eliminar(self):
         id_contrato, id_espacio = self._selected_ids()
@@ -4850,8 +4953,8 @@ class ContratosDialog(QDialog):
                 row_pagos = cur.fetchone()
                 pagos = int((row_pagos["cantidad"] if row_pagos else 0) or 0)
             except sqlite3.Error:
-                activo = False
-                pagos = 0
+                _mostrar_error(self, "Error", "No se pudo comprobar el contrato. No se eliminara.")
+                return
             finally:
                 if conn:
                     conn.close()
@@ -4865,16 +4968,16 @@ class ContratosDialog(QDialog):
                 )
                 return
 
-            detalle_extra = ""
             if pagos > 0:
-                detalle_extra = (
-                    f"\nTambien se eliminaran {pagos} pago/s asociados a este contrato."
+                QMessageBox.warning(
+                    self, "Conservar historial",
+                    "Este contrato tiene pagos registrados. Se conserva en Historial para no perder los cobros ni alterar reportes anteriores.",
                 )
+                return
             confirmar = QMessageBox.question(
                 self,
                 "Eliminar contrato",
-                "Esto eliminara el contrato inactivo definitivamente. Continuar?"
-                + detalle_extra,
+                "Esto eliminara el contrato inactivo sin pagos definitivamente. Continuar?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -4893,9 +4996,11 @@ class ContratosDialog(QDialog):
                 _auditar(
                     self,
                     "Contrato eliminado",
-                    f"ID {id_contrato} - pagos eliminados: {resultado.get('pagos', 0)}",
+                    f"ID {id_contrato} - contrato sin pagos",
                 )
                 self._cargar()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Conservar historial", str(exc))
             except sqlite3.IntegrityError:
                 _mostrar_error(
                     self,
@@ -5020,13 +5125,13 @@ class HistorialContratosDialog(QDialog):
             self.btn_eliminar.setToolTip("Selecciona un contrato del historial.")
             return
         pagos = self._contar_pagos_contrato(id_contrato)
-        self.btn_eliminar.setEnabled(True)
+        self.btn_eliminar.setEnabled(pagos == 0)
         if pagos > 0:
             self.btn_eliminar.setToolTip(
-                f"Elimina el contrato del historial y tambien sus {pagos} pago/s."
+                f"Este contrato tiene {pagos} pago/s. Se conserva para proteger el historial financiero."
             )
         else:
-            self.btn_eliminar.setToolTip("Elimina el contrato del historial.")
+            self.btn_eliminar.setToolTip("Elimina el contrato del historial sin pagos.")
 
     def _cargar(self):
         self.table.setRowCount(0)
@@ -5055,12 +5160,13 @@ class HistorialContratosDialog(QDialog):
             self.table.setItem(r, 8, item_estado)
 
             estado = vista["estado"]
+            colores = presentation_palette(_tema_claro_activo())
             if "VENCIDO" in estado:
-                bg = QColor(127, 29, 29)
-                fg = QColor(255, 255, 255)
+                bg = QColor(colores["danger_soft"])
+                fg = QColor(colores["danger"])
             else:
-                bg = QColor(55, 65, 81)
-                fg = QColor(229, 231, 235)
+                bg = QColor(colores["raised"])
+                fg = QColor(colores["muted"])
             item_estado.setBackground(QBrush(bg))
             item_estado.setForeground(QBrush(fg))
             cantidad += 1
@@ -5148,15 +5254,16 @@ class HistorialContratosDialog(QDialog):
             QMessageBox.warning(self, "Historial", "Solo DUENO puede eliminar contratos.")
             return
         pagos = self._contar_pagos_contrato(id_contrato)
+        if pagos > 0:
+            QMessageBox.warning(
+                self, "Conservar historial",
+                "Este contrato tiene pagos registrados. Se conserva en Historial para no perder los cobros ni alterar reportes anteriores.",
+            )
+            return
         confirmar = QMessageBox.question(
             self,
             "Eliminar contrato",
-            "Esto eliminara el contrato del historial definitivamente. Continuar?"
-            + (
-                f"\nTambien se eliminaran {pagos} pago/s asociados."
-                if pagos > 0
-                else ""
-            ),
+            "Esto eliminara el contrato del historial sin pagos definitivamente. Continuar?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -5174,7 +5281,7 @@ class HistorialContratosDialog(QDialog):
             _auditar(
                 self,
                 "Contrato eliminado desde historial",
-                f"ID {id_contrato} - pagos eliminados: {resultado.get('pagos', 0)}",
+                f"ID {id_contrato} - contrato sin pagos",
             )
             self._cargar()
             parent = self.parent()
@@ -5183,6 +5290,8 @@ class HistorialContratosDialog(QDialog):
                     parent._cargar()
                 except Exception:
                     pass
+        except ValueError as exc:
+            QMessageBox.warning(self, "Conservar historial", str(exc))
         except sqlite3.IntegrityError:
             _mostrar_error(
                 self,
@@ -5359,6 +5468,7 @@ class ClientesDialog(QDialog):
         form = QFormLayout()
         self.input_dni = QLineEdit()
         self.input_dni.setMaxLength(10)
+        _instalar_formato_dni(self.input_dni)
         self.input_dni.setValidator(
             QRegularExpressionValidator(QRegularExpression(r"[0-9.]{0,10}"), self.input_dni)
         )
@@ -6151,13 +6261,12 @@ class ClientesDialog(QDialog):
                 conn.close()
 
     def _eliminar_cliente(self):
+        if (self.rol or "").strip().upper() != "DUENO":
+            QMessageBox.warning(self, "Permiso", "Solo DUENO puede eliminar clientes.")
+            return
         cliente_id = self._selected_cliente_id()
         if not cliente_id:
-            QMessageBox.warning(
-                self,
-                "Cliente",
-                "Selecciona un cliente en la lista para eliminarlo.",
-            )
+            QMessageBox.warning(self, "Cliente", "Selecciona un cliente en la lista para eliminarlo.")
             return
         if not self._validar_cliente_activo_seleccionado("eliminar el cliente"):
             return
@@ -6165,54 +6274,55 @@ class ClientesDialog(QDialog):
             return
         try:
             confirmar = QMessageBox.question(
-                self,
-                "Eliminar cliente",
-                "Esto eliminara el cliente y sus vehiculos. Continuar?",
-                QMessageBox.Yes | QMessageBox.No,
+                self, "Eliminar cliente", "Esto eliminara el cliente sin historial y sus vehiculos. Continuar?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if confirmar != QMessageBox.Yes:
                 return
             conn = None
             try:
                 conn = get_connection()
+                conn.execute("BEGIN IMMEDIATE")
                 cur = conn.cursor()
-                deps = self._resumen_dependencias_cliente(cliente_id, conn=conn)
-                if deps["contratos"] > 0 or deps["movimientos"] > 0:
-                    partes = []
-                    if deps["contratos"] > 0:
-                        partes.append(f"{deps['contratos']} contrato/s")
-                    if deps["movimientos"] > 0:
-                        partes.append(f"{deps['movimientos']} movimiento/s")
-                    detalle = ", ".join(partes)
-                    QMessageBox.warning(
-                        self,
-                        "Cliente",
-                        "No se puede eliminar el cliente porque tiene historial asociado.\n"
-                        f"Dependencias detectadas: {detalle}.\n"
-                        "Si quieres conservar el historial, desactivalo en lugar de eliminarlo.",
-                    )
-                    return
+                cur.execute("SELECT activo FROM clientes WHERE id_cliente=?", (cliente_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("El cliente ya no existe. Actualiza la lista.")
+                if int(row["activo"] or 0) != 1:
+                    raise ValueError("El cliente esta desactivado. Activalo antes de eliminarlo.")
+                # No usar el resumen visual, que devuelve ceros si una consulta
+                # falla: eliminar requiere comprobar todas las dependencias.
                 cur.execute(
-                    "UPDATE espacios SET id_cliente = NULL WHERE id_cliente = ?",
-                    (cliente_id,),
+                    "SELECT (SELECT COUNT(*) FROM cochera_contratos WHERE id_cliente=?) AS contratos, "
+                    "(SELECT COUNT(*) FROM movimientos m JOIN vehiculos v ON v.id_vehiculo=m.id_vehiculo "
+                    "WHERE v.id_cliente=?) AS movimientos",
+                    (cliente_id, cliente_id),
                 )
-                cur.execute("DELETE FROM vehiculos WHERE id_cliente = ?", (cliente_id,))
-                cur.execute("DELETE FROM clientes WHERE id_cliente = ?", (cliente_id,))
+                deps = cur.fetchone()
+                if not deps:
+                    raise ValueError("No se pudieron comprobar las dependencias. No se elimino el cliente.")
+                if int(deps["contratos"] or 0) > 0 or int(deps["movimientos"] or 0) > 0:
+                    raise ValueError(
+                        "No se puede eliminar el cliente porque tiene historial asociado. "
+                        f"Contratos: {int(deps['contratos'] or 0)}. Movimientos: {int(deps['movimientos'] or 0)}. "
+                        "Desactivalo en lugar de eliminarlo para conservar el historial."
+                    )
+                cur.execute("UPDATE espacios SET id_cliente=NULL WHERE id_cliente=?", (cliente_id,))
+                cur.execute("DELETE FROM vehiculos WHERE id_cliente=?", (cliente_id,))
+                cur.execute("DELETE FROM clientes WHERE id_cliente=? AND activo=1", (cliente_id,))
+                if cur.rowcount != 1:
+                    raise ValueError("El cliente cambio mientras se intentaba eliminarlo.")
                 conn.commit()
-                detalle = (
-                    f"{self.input_nombre.text().strip()} - DNI {self.input_dni.text().strip()}".strip()
-                )
+                detalle = f"{self.input_nombre.text().strip()} - DNI {self.input_dni.text().strip()}".strip()
                 _auditar(self, "Cliente eliminado", detalle)
                 self._cargar()
                 self._limpiar_form()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Cliente", str(exc))
             except sqlite3.IntegrityError:
-                _mostrar_error(
-                    self,
-                    "Error",
-                    "No se pudo eliminar el cliente porque tiene datos relacionados.",
-                )
+                _mostrar_error(self, "Error", "No se pudo eliminar el cliente porque tiene datos relacionados. No se realizaron cambios.")
             except sqlite3.Error:
-                _mostrar_error(self, "Error", "No se pudo eliminar el cliente.")
+                _mostrar_error(self, "Error", "No se pudo comprobar o eliminar el cliente. No se realizaron cambios.")
             finally:
                 if conn:
                     conn.close()
@@ -7251,6 +7361,8 @@ class EspacioItem(QGraphicsRectItem):
     def __init__(self, codigo, rect, color, estado="LIBRE", grid=10):
         super().__init__(rect)
         self.codigo = codigo
+        self.codigo_original = None
+        self.es_reservado = 0
         self.estado = estado
         self.info = ""
         self.grid = grid
@@ -7262,7 +7374,7 @@ class EspacioItem(QGraphicsRectItem):
         self.setBrush(QBrush(color))
         self.setPen(QPen(Qt.black, 2))
         self.label = QGraphicsTextItem(self)
-        self.label.setFont(QFont("Arial", 8))
+        self.label.setFont(QFont("Segoe UI", 9))
         self.set_estado(estado, color)
         self._centrar_label()
 
@@ -7270,6 +7382,26 @@ class EspacioItem(QGraphicsRectItem):
         self.codigo = codigo
         self._actualizar_label()
         self._centrar_label()
+
+    def paint(self, painter, option, widget=None):
+        # La seleccion nativa es punteada y casi invisible en lugares contiguos.
+        # Dibujar dentro del espacio evita tapar sus vecinos o alterar geometria.
+        normal = QStyleOptionGraphicsItem(option)
+        normal.state &= ~QStyle.State_Selected
+        super().paint(painter, normal, widget)
+        if self.isSelected():
+            painter.save()
+            painter.setBrush(Qt.NoBrush)
+            borde = self.rect().adjusted(3.5, 3.5, -3.5, -3.5)
+            halo = QPen(QColor("#FFFFFF"), 7)
+            halo.setJoinStyle(Qt.MiterJoin)
+            painter.setPen(halo)
+            painter.drawRect(borde)
+            oscuro = QPen(QColor("#0B1B30"), 4)
+            oscuro.setJoinStyle(Qt.MiterJoin)
+            painter.setPen(oscuro)
+            painter.drawRect(borde)
+            painter.restore()
 
     def set_estado(self, estado, color):
         self.estado = estado
@@ -7665,7 +7797,8 @@ class MapaCocheraDialog(QDialog):
 
         self._configurar_atajos()
         self._cargar()
-        self.btn_alineado.setChecked(False)
+        self.btn_alineado.setChecked(True)
+        self.btn_alineado.hide()
 
     def _mapa_tiene_cambios(self):
         return bool(self.scene.property("map_dirty"))
@@ -7928,6 +8061,8 @@ class MapaCocheraDialog(QDialog):
         return None
 
     def _agregar(self):
+        if not self._editable:
+            return
         codigo, ok = QInputDialog.getText(self, "Nuevo espacio", "Codigo (ej: A1)")
         if not ok:
             return
@@ -7939,7 +8074,7 @@ class MapaCocheraDialog(QDialog):
                 "Escribe un codigo para el nuevo espacio antes de agregarlo al mapa.",
             )
             return
-        if self._codigo_en_escena(codigo):
+        if self._codigo_en_escena(codigo) or codigo in self._eliminados:
             QMessageBox.warning(
                 self,
                 "Codigo",
@@ -7981,6 +8116,8 @@ class MapaCocheraDialog(QDialog):
         )
 
     def _renombrar(self):
+        if not self._editable:
+            return
         item = self._item_requerido_para("renombrarlo")
         if not item:
             return
@@ -8003,7 +8140,7 @@ class MapaCocheraDialog(QDialog):
                 "El codigo no cambio.\nNo hay nada nuevo para guardar.",
             )
             return
-        if self._codigo_en_escena(nuevo):
+        if self._codigo_en_escena(nuevo) or nuevo in self._eliminados:
             QMessageBox.warning(
                 self,
                 "Codigo",
@@ -8020,21 +8157,33 @@ class MapaCocheraDialog(QDialog):
         )
 
     def _eliminar(self):
+        if not self._editable:
+            return
         item = self._item_requerido_para("eliminarlo")
         if not item:
             return
         codigo = item.codigo
+        if item.codigo_original:
+            try:
+                svc_comprobar_eliminacion_espacio(item.codigo_original)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Lugar vinculado", str(exc))
+                return
+            except sqlite3.Error:
+                _mostrar_error(self, "Error", "No se pudo comprobar la ocupacion. No se elimino el lugar.")
+                return
         confirmar = QMessageBox.question(
             self,
             "Eliminar",
-            "Se quitara este espacio solo del mapa visual.\n"
-            "No se borran clientes, contratos ni pagos.\n\n"
+            "Se quitara este lugar libre del mapa y dejara de estar disponible.\n"
+            "Se conserva su historial, sin borrar clientes, contratos ni pagos.\n\n"
             "Quieres continuar?",
             QMessageBox.Yes | QMessageBox.No,
         )
         if confirmar != QMessageBox.Yes:
             return
-        self._eliminados.add(item.codigo)
+        if item.codigo_original:
+            self._eliminados.add(item.codigo_original)
         self.scene.removeItem(item)
         self._set_mapa_dirty(True)
         QMessageBox.information(
@@ -8071,6 +8220,9 @@ class MapaCocheraDialog(QDialog):
             self._desocupar_desde_mapa(item)
 
     def _abrir_registro_hora(self, item):
+        if item.codigo_original != item.codigo:
+            QMessageBox.warning(self, "Guardar mapa", "Guarda el mapa antes de registrar un ingreso en este lugar nuevo o renombrado.")
+            return
         parent = self.parent()
         if not parent or not hasattr(parent, "ui"):
             return
@@ -8082,6 +8234,9 @@ class MapaCocheraDialog(QDialog):
         self.accept()
 
     def _abrir_salida_desde_mapa(self, item, movimiento):
+        if item.codigo_original != item.codigo:
+            QMessageBox.warning(self, "Guardar mapa", "Guarda el mapa antes de registrar una salida en este lugar nuevo o renombrado.")
+            return False
         parent = self.parent()
         if not parent or not hasattr(parent, "ui"):
             return False
@@ -8107,6 +8262,9 @@ class MapaCocheraDialog(QDialog):
         return True
 
     def _desocupar_desde_mapa(self, item):
+        if item.codigo_original != item.codigo:
+            QMessageBox.warning(self, "Guardar mapa", "Guarda el mapa antes de operar sobre este lugar nuevo o renombrado.")
+            return
         codigo = item.codigo
         conn = None
         try:
@@ -8118,172 +8276,85 @@ class MapaCocheraDialog(QDialog):
             )
             row = cur.fetchone()
             if not row:
-                QMessageBox.warning(
-                    self,
-                    "Desocupar",
-                    "Ese espacio no existe en la base.\n"
-                    "Guarda el mapa o actualiza la informacion antes de intentar desocuparlo.",
-                )
+                QMessageBox.warning(self, "Desocupar", "Ese lugar no existe o esta desactivado. Actualiza el mapa antes de continuar.")
                 return
             id_espacio = row["id_espacio"]
-
+            id_cliente_original = row["id_cliente"]
             cur.execute(
-                "SELECT m.id_movimiento, m.fecha_ingreso, m.id_tarifa_aplicada, "
-                "m.tarifa_hora_aplicada, v.patente, "
-                "COALESCE(NULLIF(TRIM(m.tipo_vehiculo), ''), 'AUTO') AS tipo_vehiculo "
-                "FROM movimientos m "
+                "SELECT m.id_movimiento, v.patente FROM movimientos m "
                 "JOIN vehiculos v ON v.id_vehiculo = m.id_vehiculo "
                 "WHERE m.id_espacio = ? AND m.fecha_salida IS NULL "
-                "ORDER BY m.fecha_ingreso DESC",
+                "ORDER BY m.id_movimiento DESC LIMIT 1",
                 (id_espacio,),
             )
-            movimientos_activos = cur.fetchall()
-            mov_activos = len(movimientos_activos)
-
-            if mov_activos > 0:
-                movimiento = movimientos_activos[0]
-                if self._abrir_salida_desde_mapa(item, movimiento):
-                    return
-
+            movimiento = cur.fetchone()
+            if movimiento:
+                if not self._abrir_salida_desde_mapa(item, movimiento):
+                    QMessageBox.warning(
+                        self, "Registrar salida",
+                        "Este lugar tiene un vehiculo dentro. Registra la salida y su pago desde Estacionamiento. "
+                        "No se libero el lugar ni se realizo ningun cobro.",
+                    )
+                return
             cur.execute(
-                "SELECT COUNT(*) FROM cochera_contratos WHERE id_espacio = ? AND activo = 1",
+                "SELECT 1 FROM cochera_contratos WHERE id_espacio = ? AND activo = 1 LIMIT 1",
                 (id_espacio,),
             )
-            contratos_activos = cur.fetchone()[0] or 0
-
-            tiene_cliente = row["id_cliente"] is not None
-            if mov_activos == 0 and contratos_activos == 0 and not tiene_cliente:
-                QMessageBox.information(
-                    self,
-                    "Desocupar",
-                    "Ese espacio ya esta libre.\nNo hay nada para cerrar o liberar.",
+            if cur.fetchone():
+                QMessageBox.warning(
+                    self, "Contrato activo",
+                    "Este lugar tiene un contrato activo. Para liberarlo, da de baja el contrato desde Contratos. "
+                    "No se modifico el contrato ni el cliente.",
                 )
                 return
-
-            tarifa_row = None
-            if mov_activos > 0:
-                for mov in movimientos_activos:
-                    tarifa_mov = float(mov["tarifa_hora_aplicada"] or 0.0)
-                    if tarifa_mov <= 0:
-                        if tarifa_row is None:
-                            cur.execute(
-                                "SELECT precio_hora, precio_hora_auto, precio_hora_moto, precio_hora_camioneta "
-                                "FROM tarifas WHERE activa = 1 "
-                                "ORDER BY fecha_desde DESC LIMIT 1"
-                            )
-                            tarifa_row = cur.fetchone()
-                        if not tarifa_row:
-                            QMessageBox.warning(
-                                self,
-                                "Desocupar",
-                                "No hay tarifa por hora definida para calcular el cierre del estacionamiento.\n"
-                                "Carga una tarifa antes de desocupar este espacio.",
-                            )
-                            return
-                        tarifa_mov = _tarifa_hora_desde_row(tarifa_row, mov["tipo_vehiculo"])
-                    if tarifa_mov is None:
-                        QMessageBox.warning(
-                            self,
-                            "Desocupar",
-                            (
-                                "No hay tarifa por hora definida para "
-                                f"{_texto_tipo_vehiculo(mov['tipo_vehiculo'])}.\n"
-                                "Carga esa tarifa antes de cerrar el movimiento."
-                            ),
-                        )
-                        return
-
+            if id_cliente_original is None:
+                QMessageBox.information(self, "Desocupar", "Ese lugar ya esta libre. No hay ninguna asignacion para quitar.")
+                return
+            if not self._editable:
+                QMessageBox.warning(self, "Permiso", "Solo el duenio puede quitar una asignacion de cliente sin contrato.")
+                return
             confirmar = QMessageBox.question(
-                self,
-                "Desocupar espacio",
-                "Se liberara el espacio y se cerraran ocupaciones activas.\nContinuar?",
+                self, "Quitar asignacion",
+                f"El lugar {codigo} tiene un cliente asignado, pero no tiene contratos activos ni vehiculos dentro.\n\n"
+                "Se quitara solamente esta asignacion. No se borrara el cliente, su patente ni su historial.\n"
+                "Quieres continuar?",
                 QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
             if confirmar != QMessageBox.Yes:
                 return
 
-            detalle_salida = []
-            if mov_activos > 0:
-                salida_dt = datetime.now()
-                salida_db = salida_dt.strftime("%Y-%m-%d %H:%M:%S")
-                salida_txt = salida_dt.strftime("%d/%m/%Y %H:%M:%S")
-                for mov in movimientos_activos:
-                    fecha_ingreso = mov["fecha_ingreso"] or ""
-                    dt_ing = _parse_fecha_db(fecha_ingreso)
-                    if not dt_ing:
-                        dt_ing = salida_dt
-                    tarifa_mov = float(mov["tarifa_hora_aplicada"] or 0.0)
-                    if tarifa_mov <= 0:
-                        tarifa_mov = _tarifa_hora_desde_row(tarifa_row, mov["tipo_vehiculo"])
-                    _, total = _calcular_total_estadia(
-                        dt_ing,
-                        salida_dt,
-                        tarifa_mov,
-                        tolerancia_min=15,
-                    )
-
-                    cur.execute(
-                        "UPDATE movimientos SET fecha_salida = ?, total = ? WHERE id_movimiento = ?",
-                        (salida_db, total, mov["id_movimiento"]),
-                    )
-                    cur.execute(
-                        "INSERT INTO pagos (id_movimiento, monto, metodo) VALUES (?, ?, ?)",
-                        (mov["id_movimiento"], total, "Mapa"),
-                    )
-
-                    ingreso_txt = dt_ing.strftime("%d/%m/%Y %H:%M:%S")
-                    detalle_salida.append(
-                        (
-                            _formatear_patente(mov["patente"] or "-"),
-                            ingreso_txt,
-                            salida_txt,
-                            total,
-                            _texto_tipo_vehiculo(mov["tipo_vehiculo"]),
-                        )
-                    )
-
-            if contratos_activos > 0:
-                cur.execute(
-                    "UPDATE cochera_contratos SET activo = 0 WHERE id_espacio = ? AND activo = 1",
-                    (id_espacio,),
-                )
-
+            # La confirmacion puede quedar abierta: volver a comprobar dentro de
+            # la transaccion para no liberar un lugar ocupado durante ese lapso.
+            conn.execute("BEGIN IMMEDIATE")
             cur.execute(
-                "UPDATE espacios SET id_cliente = NULL WHERE id_espacio = ?",
+                "SELECT id_cliente FROM espacios WHERE id_espacio = ? AND activo = 1",
                 (id_espacio,),
             )
-            conn.commit()
-
-            _auditar(
-                self,
-                "Espacio desocupado desde mapa",
-                f"Codigo {codigo} - Movimientos cerrados: {mov_activos} - Contratos dados de baja: {contratos_activos}",
+            actual = cur.fetchone()
+            if not actual or actual["id_cliente"] != id_cliente_original:
+                raise ValueError("La asignacion cambio mientras confirmabas. Actualiza el mapa y vuelve a intentarlo.")
+            cur.execute(
+                "SELECT 1 FROM movimientos WHERE id_espacio = ? AND fecha_salida IS NULL "
+                "UNION ALL SELECT 1 FROM cochera_contratos WHERE id_espacio = ? AND activo = 1 LIMIT 1",
+                (id_espacio, id_espacio),
             )
+            if cur.fetchone():
+                raise ValueError("El lugar ahora tiene un vehiculo o contrato activo. No se quito la asignacion.")
+            cur.execute(
+                "UPDATE espacios SET id_cliente = NULL WHERE id_espacio = ? AND id_cliente = ?",
+                (id_espacio, id_cliente_original),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("No se pudo confirmar la asignacion. No se modifico el lugar.")
+            conn.commit()
+            _auditar(self, "Asignacion de cliente quitada desde mapa", f"Codigo {codigo} - Cliente {id_cliente_original}")
             self._actualizar_item_por_codigo(item)
-            if detalle_salida:
-                bloques = []
-                for patente, ingreso_txt, salida_txt, total, tipo_txt in detalle_salida:
-                    bloques.append(
-                        f"Patente: {patente}\n"
-                        f"Tipo: {tipo_txt}\n"
-                        f"Ingreso: {ingreso_txt}\n"
-                        f"Salida: {salida_txt}\n"
-                        f"Precio: {_fmt_money(total)}"
-                    )
-                detalle_txt = "\n\n".join(bloques)
-                QMessageBox.information(
-                    self,
-                    "Desocupar",
-                    f"Espacio {codigo} desocupado correctamente.\n\n{detalle_txt}",
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "Desocupar",
-                    f"Espacio {codigo} desocupado correctamente.",
-                )
+            QMessageBox.information(self, "Desocupar", f"Se quito la asignacion del lugar {codigo}. Se conservaron el cliente, las patentes y el historial.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Desocupar", str(exc))
         except sqlite3.Error:
-            _mostrar_error(self, "Error", "No se pudo desocupar el espacio.")
+            _mostrar_error(self, "Error", "No se pudo comprobar o liberar el lugar. No se realizaron cambios.")
         finally:
             if conn:
                 conn.close()
@@ -8328,6 +8399,8 @@ class MapaCocheraDialog(QDialog):
                     estado=estado,
                     grid=self._grid,
                 )
+                item.codigo_original = codigo
+                item.es_reservado = int(es_reservado or 0)
                 if not self._editable:
                     item.setFlags(QGraphicsItem.ItemIsSelectable)
                 info = ""
@@ -8339,8 +8412,7 @@ class MapaCocheraDialog(QDialog):
                 elif es_reservado == 1:
                     info = "Reservado"
                 item.set_info(info)
-                x_snap, y_snap = self._snap_a_cuadricula(x, y)
-                item.setPos(x_snap, y_snap)
+                item.setPos(x, y)
                 self.scene.addItem(item)
             self._actualizar_area_trabajo()
         except sqlite3.Error:
@@ -8377,85 +8449,39 @@ class MapaCocheraDialog(QDialog):
             )
 
     def _set_cochera(self, valor):
+        if not self._editable:
+            return
         item = self._item_requerido_para(
             "marcarlo como cochera" if valor else "quitarle la marca de cochera"
         )
         if not item:
             return
         codigo = item.codigo
+        reservado = 1 if valor else 0
+        if item.es_reservado == reservado:
+            QMessageBox.information(self, "Cochera", "El lugar ya tiene ese tipo.")
+            return
         conn = None
         try:
             conn = get_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT COALESCE(es_reservado, 0) AS es_reservado FROM espacios WHERE codigo = ?",
-                (codigo,),
-            )
-            row_actual = cur.fetchone()
-            es_cochera_actual = int((row_actual["es_reservado"] if row_actual else 0) or 0) == 1
-            if valor and es_cochera_actual:
-                QMessageBox.information(
-                    self,
-                    "Cochera",
-                    f"El espacio {codigo} ya esta marcado como cochera.",
-                )
-                return
-            if not valor and not es_cochera_actual:
-                QMessageBox.information(
-                    self,
-                    "Cochera",
-                    f"El espacio {codigo} ya esta disponible para estacionamiento.",
-                )
-                return
-            if not valor:
-                cur.execute(
-                    "SELECT COUNT(*) FROM cochera_contratos "
-                    "WHERE id_espacio = ("
-                    "SELECT id_espacio FROM espacios WHERE codigo = ? AND activo = 1"
-                    ") "
-                    "AND COALESCE(en_historial, 0) = 0",
-                    (codigo,),
-                )
-                contratos_vigentes = int((cur.fetchone()[0] or 0) or 0)
-                if contratos_vigentes > 0:
-                    QMessageBox.warning(
-                        self,
-                        "Cochera",
-                        "No se puede quitar la marca de cochera porque ese espacio "
-                        "todavia tiene contratos fuera del historial.\n"
-                        "Da de baja o pasa esos contratos a historial primero.",
-                    )
-                    return
-            if valor:
-                cur.execute(
-                    "SELECT COUNT(*) FROM movimientos m "
-                    "JOIN espacios e ON e.id_espacio = m.id_espacio "
-                    "WHERE e.codigo = ? AND m.fecha_salida IS NULL",
-                    (codigo,),
-                )
-                if (cur.fetchone()[0] or 0) > 0:
-                    QMessageBox.warning(
-                        self,
-                        "Cochera",
-                        "No se puede marcar como cochera porque el espacio tiene un ingreso activo.\n"
-                        "Registra la salida o desocupa el lugar primero.",
-                    )
-                    return
-            cur.execute(
-                "INSERT INTO espacios (codigo, es_reservado, activo) "
-                "VALUES (?, ?, 1) "
-                "ON CONFLICT(codigo) DO UPDATE SET es_reservado = excluded.es_reservado",
-                (codigo, 1 if valor else 0),
-            )
-            conn.commit()
+            svc_comprobar_tipo_espacio(conn.cursor(), item.codigo_original or codigo, reservado)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cochera", str(exc))
+            return
         except sqlite3.Error:
-            _mostrar_error(self, "Error", "No se pudo actualizar el espacio.")
+            _mostrar_error(self, "Error", "No se pudo comprobar el lugar. No se modifico su tipo.")
             return
         finally:
             if conn:
                 conn.close()
 
+        item.es_reservado = reservado
         self._actualizar_item_por_codigo(item)
+        if not item.codigo_original:
+            estado, color = self._estado_por_datos(reservado, None, 0)
+            item.set_estado(estado, color)
+            item.set_info("Reservado" if reservado else "")
+        self._set_mapa_dirty(True)
         QMessageBox.information(
             self,
             "Cochera",
@@ -8482,7 +8508,7 @@ class MapaCocheraDialog(QDialog):
                 "LEFT JOIN vehiculos v ON v.id_vehiculo = mv.id_vehiculo "
                 "LEFT JOIN clientes c ON c.id_cliente = e.id_cliente "
                 "WHERE e.codigo = ?",
-                (item.codigo,),
+                (item.codigo_original or item.codigo,),
             )
             row = cur.fetchone()
         except sqlite3.Error:
@@ -8497,6 +8523,7 @@ class MapaCocheraDialog(QDialog):
             return
 
         es_reservado, id_cliente, ocupado, patente, nombre = row
+        es_reservado = item.es_reservado
         estado, color = self._estado_por_datos(es_reservado, id_cliente, ocupado)
         info = ""
         if ocupado == 1 and patente:
@@ -8538,7 +8565,7 @@ class MapaCocheraDialog(QDialog):
         for item in self.scene.items():
             if not isinstance(item, EspacioItem):
                 continue
-            row = status.get(item.codigo)
+            row = status.get(item.codigo_original or item.codigo)
             if not row:
                 estado = (item.estado or "LIBRE").upper()
                 if estado == "OCUPADO":
@@ -8550,7 +8577,7 @@ class MapaCocheraDialog(QDialog):
                 item.set_estado(estado, color)
                 continue
             estado, color = self._estado_por_datos(
-                row["es_reservado"], row["id_cliente"], row["ocupado"]
+                item.es_reservado, row["id_cliente"], row["ocupado"]
             )
             item.set_estado(estado, color)
             info = ""
@@ -8564,6 +8591,8 @@ class MapaCocheraDialog(QDialog):
             item.set_info(info)
 
     def _guardar(self, mostrar_mensaje=True):
+        if not self._editable:
+            return False
         if not self._mapa_tiene_cambios():
             if mostrar_mensaje:
                 QMessageBox.information(
@@ -8572,35 +8601,22 @@ class MapaCocheraDialog(QDialog):
                     "No hay cambios pendientes para guardar.",
                 )
             return True
-        conn = None
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-
-            for codigo in self._eliminados:
-                cur.execute("DELETE FROM espacios_mapa WHERE codigo = ?", (codigo,))
-
+            items = []
             for item in self.scene.items():
                 if not isinstance(item, EspacioItem):
                     continue
                 codigo = item.codigo
                 pos = item.pos()
                 rect = item.rect()
-                # Si el cuadrado existe en el mapa pero todavia no en espacios, lo doy de alta aca y queda todo parejo.
-                cur.execute(
-                    "INSERT OR IGNORE INTO espacios (codigo, es_reservado, activo) "
-                    "VALUES (?, 0, 1)",
-                    (codigo,),
-                )
-                cur.execute(
-                    "INSERT INTO espacios_mapa (codigo, x, y, w, h) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT(codigo) DO UPDATE SET "
-                    "x=excluded.x, y=excluded.y, w=excluded.w, h=excluded.h",
-                    (codigo, int(pos.x()), int(pos.y()), int(rect.width()), int(rect.height())),
-                )
-
-            conn.commit()
+                items.append({"codigo": codigo, "codigo_original": item.codigo_original,
+                              "es_reservado": item.es_reservado,
+                              "x": pos.x(), "y": pos.y(), "w": rect.width(), "h": rect.height()})
+            svc_guardar_mapa(items, self._eliminados)
+            for item in self.scene.items():
+                if isinstance(item, EspacioItem):
+                    item.codigo_original = item.codigo
+            self._eliminados.clear()
             self._set_mapa_dirty(False)
             if mostrar_mensaje:
                 QMessageBox.information(
@@ -8610,13 +8626,12 @@ class MapaCocheraDialog(QDialog):
                     "Los cambios visuales ya quedaron registrados.",
                 )
             return True
+        except ValueError as exc:
+            QMessageBox.warning(self, "No se guardo el mapa", str(exc))
+            return False
         except sqlite3.Error:
             _mostrar_error(self, "Error", "No se pudo guardar el mapa.")
             return False
-        finally:
-            if conn:
-                conn.close()
-
     # Controla que no se pierdan cambios al cerrar la ventana
     def closeEvent(self, event):
         if not self._editable or not self._mapa_tiene_cambios():
@@ -8741,7 +8756,7 @@ class VencimientosDialog(QDialog):
         self._cargar()
 
     def _tema_claro(self):
-        return (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower() == "claro"
+        return _tema_claro_activo()
 
     def _aplicar_estilo_tema(self):
         if self._tema_claro():
@@ -9166,8 +9181,8 @@ class VencimientosDialog(QDialog):
                     item.setBackground(QColor("#fee2e2"))
                     item.setForeground(QColor("#991b1b"))
                 else:
-                    item.setBackground(QColor("#3b1f25"))
-                    item.setForeground(QColor("#fecaca"))
+                    item.setBackground(QColor(presentation_palette(False)["danger_soft"]))
+                    item.setForeground(QColor(presentation_palette(False)["danger"]))
                 if avisado_hoy:
                     font = item.font()
                     font.setBold(True)
@@ -9177,7 +9192,7 @@ class VencimientosDialog(QDialog):
             self.label_vencidos.setText(f"Total vencidos: {len(vencidos)}")
             if not vencidos:
                 item = QListWidgetItem("Sin contratos vencidos.")
-                item.setForeground(QColor("#64748b" if tema_claro else "#9ca3af"))
+                item.setForeground(QColor("#64748b" if tema_claro else presentation_palette(False)["muted"]))
                 self.lista_vencidos.addItem(item)
 
             cur.execute(
@@ -9211,14 +9226,14 @@ class VencimientosDialog(QDialog):
                 item.setData(Qt.UserRole, dict(row))
                 dias = self._dias_hasta(fecha)
                 if dias is not None and dias <= 1:
-                    item.setBackground(QColor("#ffedd5" if tema_claro else "#402018"))
-                    item.setForeground(QColor("#9a3412" if tema_claro else "#fdba74"))
+                    item.setBackground(QColor("#ffedd5" if tema_claro else presentation_palette(False)["warning_soft"]))
+                    item.setForeground(QColor("#9a3412" if tema_claro else presentation_palette(False)["warning"]))
                 elif dias is not None and dias <= 3:
-                    item.setBackground(QColor("#fef3c7" if tema_claro else "#3b3217"))
-                    item.setForeground(QColor("#92400e" if tema_claro else "#fde68a"))
+                    item.setBackground(QColor("#fef3c7" if tema_claro else presentation_palette(False)["warning_soft"]))
+                    item.setForeground(QColor("#92400e" if tema_claro else presentation_palette(False)["warning"]))
                 else:
-                    item.setBackground(QColor("#eff6ff" if tema_claro else "#242a33"))
-                    item.setForeground(QColor("#1d4ed8" if tema_claro else "#dbeafe"))
+                    item.setBackground(QColor("#eff6ff" if tema_claro else presentation_palette(False)["soft"]))
+                    item.setForeground(QColor("#1d4ed8" if tema_claro else presentation_palette(False)["map_free_fg"]))
                 if avisado_hoy:
                     font = item.font()
                     font.setBold(True)
@@ -9228,7 +9243,7 @@ class VencimientosDialog(QDialog):
             self.label_proximos.setText(f"Total proximos: {len(proximos)}")
             if not proximos:
                 item = QListWidgetItem("Sin vencimientos proximos.")
-                item.setForeground(QColor("#64748b" if tema_claro else "#9ca3af"))
+                item.setForeground(QColor("#64748b" if tema_claro else presentation_palette(False)["muted"]))
                 self.lista_proximos.addItem(item)
         except sqlite3.Error:
             self.label_vencidos.setText("No disponible (falta tabla de contratos)")
@@ -9337,6 +9352,7 @@ class ReportesDialog(QDialog):
         self._es_dueno = (getattr(parent, "rol", "") or "").strip().upper() == "DUENO"
         self._detalle_cache = []
         self._detalle_filtrado_cache = []
+        self._error_carga = None
 
         layout = QVBoxLayout(self)
 
@@ -9381,7 +9397,7 @@ class ReportesDialog(QDialog):
         filtros.addWidget(self.combo_tipo)
         filtros.addWidget(QLabel("Metodo"))
         self.combo_metodo = QComboBox()
-        self.combo_metodo.addItems(["Todos", "Efectivo", "Transferencia", "Tarjeta", "Otro"])
+        self.combo_metodo.addItems(["Todos", "Efectivo", "Transferencia", "Tarjeta", "QR", "Otro"])
         self.combo_metodo.setToolTip("Filtra el historial por metodo de cobro.")
         filtros.addWidget(self.combo_metodo)
         self.input_buscar = QLineEdit()
@@ -9473,8 +9489,30 @@ class ReportesDialog(QDialog):
 
     def _cargar(self):
         desde_key, hasta_key = self._periodo()
-        self._detalle_cache = self._consultar_detalle(desde_key, hasta_key)
+        try:
+            self._detalle_cache = self._consultar_detalle(desde_key, hasta_key)
+        except sqlite3.Error:
+            self._error_carga = "No se pudieron leer los pagos. Los importes no estan disponibles. Pulsa Actualizar para volver a intentar."
+            self._detalle_cache = []
+            self._mostrar_error_carga()
+            return False
+        self._error_carga = None
+        self.btn_export_excel.setEnabled(True)
         self._aplicar_filtros()
+        return True
+
+    def _mostrar_error_carga(self):
+        self._detalle_filtrado_cache = []
+        for label in (self.label_cochera_value, self.label_est_value, self.label_total_value):
+            label.setText("No disponible")
+        self.btn_export_excel.setEnabled(False)
+        self.btn_eliminar.setEnabled(False)
+        self.table_historial.clearSpans()
+        self.table_historial.setRowCount(1)
+        item = QTableWidgetItem(self._error_carga)
+        item.setFlags(Qt.NoItemFlags)
+        self.table_historial.setSpan(0, 0, 1, self.table_historial.columnCount())
+        self.table_historial.setItem(0, 0, item)
 
     @staticmethod
     def _sum_monto(rows, tipo=None):
@@ -9521,9 +9559,13 @@ class ReportesDialog(QDialog):
         return detalle
 
     def _aplicar_filtros(self):
+        if getattr(self, "_error_carga", None):
+            self._mostrar_error_carga()
+            return
         detalle = self._detalle_filtrado()
         self._detalle_filtrado_cache = list(detalle)
         self._actualizar_resumen(detalle)
+        self.table_historial.clearSpans()
         self.table_historial.setRowCount(0)
         for row in detalle:
             r = self.table_historial.rowCount()
@@ -9574,6 +9616,9 @@ class ReportesDialog(QDialog):
         )
 
     def _eliminar_reporte(self):
+        if getattr(self, "_error_carga", None):
+            QMessageBox.warning(self, "Reportes no disponibles", "Actualiza y verifica los pagos antes de eliminar una operacion.")
+            return
         if not self._es_dueno:
             QMessageBox.warning(
                 self,
@@ -9680,6 +9725,9 @@ class ReportesDialog(QDialog):
                 conn.close()
 
     def _exportar_excel(self):
+        if getattr(self, "_error_carga", None):
+            QMessageBox.warning(self, "Reportes no disponibles", "No se puede exportar un reporte cuya lectura fallo. Pulsa Actualizar y verifica los datos.")
+            return
         try:
             import xlsxwriter
         except ImportError:
@@ -9999,6 +10047,7 @@ class CajaDiariaDialog(QDialog):
         self._total_esperado_actual = 0.0
         self._snapshot_cierre = None
         self._metodo_rows = []
+        self._error_lectura = False
 
         layout = QVBoxLayout(self)
 
@@ -10108,10 +10157,20 @@ class CajaDiariaDialog(QDialog):
 
     def _cargar(self):
         fecha_key = self.input_fecha.date().toString("yyyy-MM-dd")
-        cochera, est, total = svc_consultar_totales_caja(fecha_key)
-        detalle = svc_consultar_detalle_metodo_caja(fecha_key)
-        cierre = svc_obtener_cierre_caja(fecha_key)
-        cierre_metodos = svc_obtener_cierre_caja_metodos(fecha_key)
+        try:
+            cochera, est, total = svc_consultar_totales_caja(fecha_key)
+            detalle = svc_consultar_detalle_metodo_caja(fecha_key)
+            cierre = svc_obtener_cierre_caja(fecha_key)
+            cierre_metodos = svc_obtener_cierre_caja_metodos(fecha_key)
+        except sqlite3.Error:
+            self._marcar_error_lectura()
+            return False
+        self._error_lectura = False
+        self.btn_guardar_cierre.setEnabled(True)
+        self.btn_limpiar_cierre.setEnabled(True)
+        self.input_observacion.setEnabled(True)
+        self.input_total_contado.setSpecialValueText("")
+        self.table_metodos.clearSpans()
 
         self.label_cochera.setText(_fmt_money(cochera))
         self.label_est.setText(_fmt_money(est))
@@ -10201,6 +10260,31 @@ class CajaDiariaDialog(QDialog):
             self.btn_reabrir_cierre.setToolTip("")
         self._actualizar_diferencia()
         self._actualizar_snapshot_cierre()
+        return True
+
+    def _marcar_error_lectura(self):
+        self._error_lectura = True
+        self._total_esperado_actual = None
+        self._snapshot_cierre = None
+        self._metodo_rows = []
+        for label in (self.label_cochera, self.label_est, self.label_total,
+                      self.label_total_real, self.label_diferencia):
+            label.setText("No disponible")
+        self.label_estado_cierre.setText("No se pudo leer la caja. Actualiza antes de guardar o reabrir un cierre.")
+        self.btn_guardar_cierre.setEnabled(False)
+        self.btn_reabrir_cierre.setEnabled(False)
+        self.btn_limpiar_cierre.setEnabled(False)
+        self.input_observacion.setEnabled(False)
+        self.input_observacion.clear()
+        self.input_total_contado.setSpecialValueText("No disponible")
+        self.input_total_contado.setValue(0)
+        self.table_metodos.clearSpans()
+        self.table_metodos.setRowCount(0)
+        self.table_metodos.setRowCount(1)
+        item = QTableWidgetItem("No se pudieron leer los pagos. Los totales no estan disponibles. Pulsa Actualizar para volver a intentar.")
+        item.setFlags(Qt.NoItemFlags)
+        self.table_metodos.setSpan(0, 0, 1, self.table_metodos.columnCount())
+        self.table_metodos.setItem(0, 0, item)
 
     def _es_dueno(self):
         return (_rol_desde_widget(self) or "").strip().upper() == "DUENO"
@@ -10274,17 +10358,24 @@ class CajaDiariaDialog(QDialog):
         return detalle
 
     def _actualizar_estado_observacion(self):
+        if getattr(self, "_error_lectura", False):
+            self.input_observacion.setStyleSheet("")
+            self.input_observacion.setToolTip("No se pueden editar importes sin leer la caja correctamente.")
+            return
         diferencia = self._total_contado_metodos() - float(self._total_esperado_actual or 0.0)
         requiere_motivo = self._hay_diferencia(diferencia)
         observacion = self.input_observacion.text().strip()
         if requiere_motivo and not observacion:
-            self.input_observacion.setStyleSheet("border: 1px solid #f87171;")
+            color = "#f87171" if _tema_claro_activo() else presentation_palette(False)["danger"]
+            self.input_observacion.setStyleSheet(f"border: 1px solid {color};")
             self.input_observacion.setToolTip("Obligatoria cuando hay diferencia de caja.")
         else:
             self.input_observacion.setStyleSheet("")
             self.input_observacion.setToolTip("")
 
     def _actualizar_diferencia(self):
+        if getattr(self, "_error_lectura", False):
+            return
         for row in self._metodo_rows:
             esperado = float(row["esperado"] or 0.0)
             contado_metodo = float(row["input_contado"].value() or 0.0)
@@ -10297,11 +10388,11 @@ class CajaDiariaDialog(QDialog):
         self.label_diferencia.setText(self._texto_diferencia(diferencia))
         tema_claro = _tema_claro_activo()
         if diferencia > 0.009:
-            color = "#15803d" if tema_claro else "#34d399"
+            color = "#15803d" if tema_claro else presentation_palette(False)["success"]
         elif diferencia < -0.009:
-            color = "#b91c1c" if tema_claro else "#f87171"
+            color = "#b91c1c" if tema_claro else presentation_palette(False)["danger"]
         else:
-            color = "#475569" if tema_claro else "#a7f3d0"
+            color = "#475569" if tema_claro else presentation_palette(False)["muted"]
         self.label_diferencia.setStyleSheet(f"color: {color}; font-weight: 600;")
         self._actualizar_estado_observacion()
 
@@ -10332,6 +10423,9 @@ class CajaDiariaDialog(QDialog):
         return self._snapshot_form_cierre() != base
 
     def _guardar_cierre(self, mostrar_mensaje=True):
+        if getattr(self, "_error_lectura", False):
+            _mostrar_error(self, "Caja no disponible", "No se puede guardar un cierre sin leer los pagos correctamente. Pulsa Actualizar para volver a intentar.")
+            return False
         if not _antirebote_iniciar(self, "caja_guardar_cierre"):
             return False
         try:
@@ -10392,6 +10486,10 @@ class CajaDiariaDialog(QDialog):
             if mostrar_mensaje:
                 QMessageBox.information(self, "Caja", "Cierre de caja guardado.")
             return True
+        except sqlite3.Error:
+            self._marcar_error_lectura()
+            _mostrar_error(self, "Caja no disponible", "Fallo la lectura de los pagos o del cierre. No se guardo ningun cierre de caja.")
+            return False
         finally:
             _antirebote_finalizar(self, "caja_guardar_cierre", cooldown_ms=700)
 
@@ -10409,6 +10507,9 @@ class CajaDiariaDialog(QDialog):
         self._actualizar_diferencia()
 
     def _reabrir_cierre(self):
+        if getattr(self, "_error_lectura", False):
+            _mostrar_error(self, "Caja no disponible", "Actualiza y verifica los datos antes de reabrir un cierre.")
+            return
         if not self._es_dueno():
             QMessageBox.warning(
                 self,
@@ -10418,7 +10519,12 @@ class CajaDiariaDialog(QDialog):
             return
 
         fecha_key = self.input_fecha.date().toString("yyyy-MM-dd")
-        cierre = svc_obtener_cierre_caja(fecha_key)
+        try:
+            cierre = svc_obtener_cierre_caja(fecha_key)
+        except sqlite3.Error:
+            self._marcar_error_lectura()
+            _mostrar_error(self, "Caja no disponible", "No se pudo leer el cierre. No se realizaron cambios.")
+            return
         if not cierre:
             QMessageBox.information(
                 self,
@@ -10671,11 +10777,6 @@ class BackupsDialog(QDialog):
             if not ok or texto.strip().upper() != "RESTAURAR":
                 return
 
-            try:
-                svc_crear_backup_db(max_backups=30)
-            except Exception:
-                pass
-
             ok = svc_restaurar_backup_db(path)
             if not ok:
                 _mostrar_error(self, "Error", "No se pudo restaurar el respaldo.")
@@ -10684,8 +10785,12 @@ class BackupsDialog(QDialog):
             QMessageBox.information(
                 self,
                 "Respaldos",
-                "Respaldo restaurado.\nSe recomienda reiniciar la aplicacion.",
+                "Respaldo restaurado. Se conservo una copia de la base anterior.\n"
+                "La aplicacion se cerrara. Volve a abrirla e ingresa con un usuario de la base restaurada.",
             )
+            app = QApplication.instance()
+            if app is not None:
+                QTimer.singleShot(0, app.quit)
             self._cargar()
         finally:
             _antirebote_finalizar(self, "backups_restaurar", cooldown_ms=1000)
@@ -10932,7 +11037,7 @@ class ConfiguracionDialog(QDialog):
         resolucion = _config_get("ui_resolucion", "1280x720")
         idx_res = self.combo_resolucion.findText(resolucion)
         self.combo_resolucion.setCurrentIndex(idx_res if idx_res >= 0 else 1)
-        tema = (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower()
+        tema = (_config_get("ui_tema", "claro") or "claro").strip().lower()
         self.combo_tema.setCurrentIndex(1 if tema == "claro" else 0)
         tamano_texto = _ui_tamano_texto()
         idx_tamano = self.combo_tamano_texto.findData(tamano_texto)
@@ -10946,7 +11051,7 @@ class ConfiguracionDialog(QDialog):
         self._actualizar_snapshot()
 
     def _seleccionar_carpeta(self, input_destino):
-        base = input_destino.text().strip() or str(Path(__file__).resolve().parent)
+        base = input_destino.text().strip() or str(Path(app_database.DB_PATH).resolve().parent)
         carpeta = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta", base)
         if carpeta:
             input_destino.setText(carpeta)
@@ -11095,7 +11200,7 @@ class VentanaPrincipal(QMainWindow):
         self._popup_primeros_pasos_mostrado = False
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle("Gestor bien pro")
+        self.setWindowTitle("Estacionamiento · Gestión")
         self._ajustar_ui()
         self._estilo_oscuro_cache = self.styleSheet()
         self._aplicar_preferencias_ui()
@@ -11108,6 +11213,8 @@ class VentanaPrincipal(QMainWindow):
         self._configurar_atajos()
         self._programar_popup_vencimientos_inicio()
         self._programar_popup_primeros_pasos()
+
+        self._presentacion = Presentation(self)
 
     def _ajustar_ui(self):
         self.resize(1280, 720)
@@ -11737,7 +11844,7 @@ class VentanaPrincipal(QMainWindow):
         _aplicar_fuente_aplicacion(app)
         if app is not None:
             self.setFont(app.font())
-        tema = (_config_get("ui_tema", "oscuro") or "oscuro").strip().lower()
+        tema = (_config_get("ui_tema", "claro") or "claro").strip().lower()
         if tema == "claro":
             self.setStyleSheet(self._estilo_claro())
         else:
@@ -12089,6 +12196,9 @@ class VentanaPrincipal(QMainWindow):
 
         self._configurar_iconos_acciones()
 
+        if hasattr(self, "_presentacion"):
+            self._presentacion.apply_preferences()
+
     def _configurar_iconos_acciones(self):
         iconos = {
             "btn_modo_sencillo": (
@@ -12137,8 +12247,8 @@ class VentanaPrincipal(QMainWindow):
             btn.setIconSize(QSize(16, 16))
 
     def _configurar_menus(self):
-        self.menu_admin = self.ui.menubar.addMenu("Administracion")
-        self.action_configuracion = QAction("Configuracion", self)
+        self.menu_admin = self.ui.menubar.addMenu("Administración")
+        self.action_configuracion = QAction("Configuración", self)
         self.ui.menubar.addAction(self.action_configuracion)
         self.action_usuarios = QAction("Usuarios", self)
         self.action_tarifas = QAction("Tarifas", self)
@@ -12176,10 +12286,7 @@ class VentanaPrincipal(QMainWindow):
         self.action_reset_cero.setEnabled(es_admin)
         self.action_configuracion.setEnabled(es_admin or es_operador)
         self._aplicar_restricciones_ui(es_admin, es_operador)
-        if self.usuario:
-            self.statusBar().showMessage(f"Usuario: {self.usuario} ({rol})")
-        elif rol:
-            self.statusBar().showMessage(f"Rol: {rol}")
+        self.statusBar().clearMessage()
 
     def _aplicar_restricciones_ui(self, es_admin, es_operador):
         self.ui.card_ingresos.setVisible(es_admin)
@@ -12790,8 +12897,8 @@ class VentanaPrincipal(QMainWindow):
 
     def _configurar_tabla_est_activos(self):
         table = self.ui.table_est_activos
-        table.setColumnCount(6)
-        headers = ["Patente", "Espacio", "Ingreso", "Patente", "Espacio", "Ingreso"]
+        table.setColumnCount(3)
+        headers = ["Patente", "Espacio", "Ingreso"]
         for i, texto in enumerate(headers):
             item = table.horizontalHeaderItem(i)
             if item is None:
@@ -12872,6 +12979,7 @@ class VentanaPrincipal(QMainWindow):
 
     def _render_activos_est(self, filas):
         table = self.ui.table_est_activos
+        table.clearSpans()
         table.clearContents()
         total = len(filas)
         if total <= 0:
@@ -12889,11 +12997,8 @@ class VentanaPrincipal(QMainWindow):
             table.setSpan(0, 0, 1, table.columnCount())
             table.setItem(0, 0, item)
             return
-        filas_por_col = (total + 1) // 2
-        table.setRowCount(filas_por_col)
-        for idx, row in enumerate(filas):
-            col_offset = 0 if idx < filas_por_col else 3
-            r = idx if idx < filas_por_col else idx - filas_por_col
+        table.setRowCount(total)
+        for r, row in enumerate(filas):
             patente_mostrar = _formatear_patente_estacionamiento(row["patente"])
             items = [
                 QTableWidgetItem(patente_mostrar),
@@ -12902,11 +13007,13 @@ class VentanaPrincipal(QMainWindow):
             ]
             for idx_item, item in enumerate(items):
                 item.setData(Qt.UserRole, row.get("id_movimiento"))
-                table.setItem(r, col_offset + idx_item, item)
+                table.setItem(r, idx_item, item)
 
     def _aplicar_filtros_activos_est(self):
         filas = self._filtrar_ordenar_activos_est(self._activos_est_cache)
         self._render_activos_est(filas)
+        if hasattr(self, "_presentacion"):
+            self._presentacion.update_active_count()
 
     def _patente_desde_tabla_est(self, row, column):
         table = self.ui.table_est_activos
@@ -13076,6 +13183,7 @@ class VentanaPrincipal(QMainWindow):
         conn = None
         try:
             conn = get_connection()
+            conn.execute("BEGIN IMMEDIATE")
             cur = conn.cursor()
             cur.execute(
                 "SELECT id_vehiculo FROM movimientos WHERE id_movimiento = ? AND fecha_salida IS NULL",
@@ -13091,8 +13199,10 @@ class VentanaPrincipal(QMainWindow):
                 return
 
             id_vehiculo = int(row["id_vehiculo"] or 0) or None
-            cur.execute("DELETE FROM pagos WHERE id_movimiento = ?", (movimiento_id,))
-            cur.execute("DELETE FROM movimientos WHERE id_movimiento = ?", (movimiento_id,))
+            if cur.execute("SELECT 1 FROM pagos WHERE id_movimiento = ? LIMIT 1", (movimiento_id,)).fetchone():
+                QMessageBox.warning(self, "Eliminar ingreso", "Ese ingreso tiene un pago registrado. No se elimino el ingreso ni su cobro.")
+                return
+            cur.execute("DELETE FROM movimientos WHERE id_movimiento = ? AND fecha_salida IS NULL", (movimiento_id,))
 
             if id_vehiculo:
                 cur.execute(
@@ -13331,6 +13441,9 @@ class VentanaPrincipal(QMainWindow):
             self.ui.label_ocupadas_value.setStyleSheet("")
             self.ui.label_libres_value.setStyleSheet("")
 
+        if hasattr(self, "_presentacion"):
+            self._presentacion.update_dashboard()
+
     def _abrir_vencimientos(self):
         dlg = VencimientosDialog(self)
         dlg.exec()
@@ -13365,6 +13478,8 @@ class VentanaPrincipal(QMainWindow):
         return int(vencidos), int(proximos)
 
     def _programar_popup_vencimientos_inicio(self):
+        if getattr(QApplication.instance(), "_modo_demo", False):
+            return
         if (self.rol or "").upper() != "DUENO":
             return
         self._popup_vencimientos_intentos = 0
@@ -13460,8 +13575,6 @@ class VentanaPrincipal(QMainWindow):
                 estado["dir_tickets_salida"],
             ]
         )
-        clientes_patentes_completo = estado["clientes"] > 0 and estado["vehiculos"] > 0
-        primera_operacion_completa = estado["contratos"] > 0 or estado["movimientos"] > 0
 
         faltantes_config = []
         if not estado["empresa_nombre"]:
@@ -13478,15 +13591,6 @@ class VentanaPrincipal(QMainWindow):
             faltantes_carpetas.append("comprobantes")
         if not estado["dir_tickets_salida"]:
             faltantes_carpetas.append("tickets de salida")
-
-        if estado["clientes"] <= 0 and estado["vehiculos"] <= 0:
-            detalle_clientes = "Crea tu primer cliente y registra al menos una patente para poder operar."
-        elif estado["clientes"] <= 0:
-            detalle_clientes = "Todavia falta cargar al menos un cliente."
-        elif estado["vehiculos"] <= 0:
-            detalle_clientes = "Ya hay clientes, pero todavia falta registrar al menos una patente."
-        else:
-            detalle_clientes = "Clientes y patentes cargados."
 
         pasos = [
             {
@@ -13525,24 +13629,9 @@ class VentanaPrincipal(QMainWindow):
                     "Primero define cuales seran cocheras y cuales seran lugares de estacionamiento."
                 ),
             },
-            {
-                "titulo": "Clientes y patentes",
-                "completo": clientes_patentes_completo,
-                "detalle": (
-                    detalle_clientes
-                    + " Esto se hace desde Cochera > Clientes (F6), donde cargas datos del cliente, telefono y patentes."
-                ),
-            },
-            {
-                "titulo": "Puesta en marcha",
-                "completo": primera_operacion_completa,
-                "detalle": (
-                    "Ya puedes operar normalmente."
-                    if primera_operacion_completa
-                    else "Como siguiente paso, entra a Cochera > Contratos (F7) para crear el primer contrato o entra a Estacionamiento para registrar el primer ingreso."
-                ),
-            },
         ]
+        for numero, paso in enumerate(pasos, start=1):
+            paso["numero"] = numero
         return pasos
 
     def _siguiente_paso_primeros_pasos(self):
@@ -13553,6 +13642,8 @@ class VentanaPrincipal(QMainWindow):
         return None, pasos
 
     def _programar_popup_primeros_pasos(self):
+        if getattr(QApplication.instance(), "_modo_demo", False):
+            return
         if (self.rol or "").upper() != "DUENO":
             return
         self._popup_primeros_pasos_mostrado = False
@@ -13568,23 +13659,23 @@ class VentanaPrincipal(QMainWindow):
         if not siguiente:
             return
         self._popup_primeros_pasos_mostrado = True
-        completados = [paso["titulo"] for paso in pasos if paso["completo"]]
-        pendientes = [paso["titulo"] for paso in pasos if not paso["completo"]]
+        completados = [f"{paso['numero']}. {paso['titulo']}" for paso in pasos if paso["completo"]]
+        pendientes = [f"{paso['numero']}. {paso['titulo']}" for paso in pasos if not paso["completo"]]
         bloque_completados = (
-            "Pasos ya completos:\n- " + "\n- ".join(completados)
+            "Pasos ya completos:\n" + "\n".join(completados)
             if completados
             else "Todavia no hay pasos completos."
         )
         bloque_pendientes = (
-            "Pendientes despues de este:\n- " + "\n- ".join(pendientes[1:])
+            "Pendientes despues de este:\n" + "\n".join(pendientes[1:])
             if len(pendientes) > 1
-            else "Si completas este paso, ya quedara lista la puesta en marcha inicial."
+            else "Al guardar el mapa, finaliza el tutorial de configuracion inicial."
         )
         QMessageBox.information(
             self,
             "Primeros pasos",
             f"{bloque_completados}\n\n"
-            f"Siguiente paso sugerido: {siguiente['titulo']}\n"
+            f"Paso {siguiente['numero']} de {len(pasos)}: {siguiente['titulo']}\n"
             f"{siguiente['detalle']}\n\n"
             f"{bloque_pendientes}",
         )
@@ -13661,6 +13752,8 @@ class VentanaPrincipal(QMainWindow):
                 )
                 if (cur.fetchone()[0] or 0) == 0:
                     return row["id_espacio"], codigo, False
+            # Un codigo explicito no puede sustituirse silenciosamente por otro.
+            return None, codigo, False
 
         row = self._buscar_espacio_libre_est(cur)
         if not row:
@@ -13748,6 +13841,7 @@ class VentanaPrincipal(QMainWindow):
             conn = get_connection()
             cur = conn.cursor()
 
+            conn.execute("BEGIN IMMEDIATE")
             id_vehiculo, id_cliente = self._obtener_o_crear_vehiculo_est(cur, patente)
 
             codigo_cochera = self._codigo_cochera_activa_cliente(cur, id_cliente)
@@ -13770,7 +13864,8 @@ class VentanaPrincipal(QMainWindow):
             id_espacio, codigo_resuelto, auto = self._resolver_espacio_est(cur, codigo)
             if not id_espacio:
                 self._log_estacionamiento(
-                    "No hay espacios disponibles en este momento.",
+                    (f"El lugar {codigo} no existe, esta ocupado o es una cochera. Elige un lugar libre."
+                     if codigo else "No hay espacios disponibles en este momento."),
                     "warn",
                     popup_parent=popup_parent,
                 )
@@ -13788,6 +13883,7 @@ class VentanaPrincipal(QMainWindow):
                 )
                 return
 
+            tarifa = svc_validar_monto(tarifa, permitir_cero=True, nombre="La tarifa")
             cur.execute(
                 "SELECT COUNT(*) FROM movimientos WHERE id_espacio = ? AND fecha_salida IS NULL",
                 (id_espacio,),
@@ -13853,6 +13949,8 @@ class VentanaPrincipal(QMainWindow):
             self.ui.input_patente_est.clear()
             self._resetear_tipo_vehiculo_est()
             self._actualizar_activos_est()
+        except ValueError as exc:
+            self._log_estacionamiento(str(exc), "warn", popup_parent=popup_parent)
         except sqlite3.Error:
             self._log_estacionamiento(
                 "Error al registrar ingreso.",
@@ -13911,7 +14009,7 @@ class VentanaPrincipal(QMainWindow):
             dt_out = datetime.now()
             salida_db = dt_out.strftime("%Y-%m-%d %H:%M:%S")
             if not dt_ing:
-                dt_ing = dt_out
+                raise ValueError("La fecha del ingreso no es valida. No se registro la salida ni el cobro.")
             horas_cobradas, total = _calcular_total_estadia(
                 dt_ing,
                 dt_out,
@@ -13948,14 +14046,21 @@ class VentanaPrincipal(QMainWindow):
             if not metodo:
                 return
 
+            metodo = svc_normalizar_metodo_pago(metodo)
+            conn.execute("BEGIN IMMEDIATE")
             cur.execute(
                 "UPDATE movimientos SET fecha_salida = ?, total = ? "
-                "WHERE id_movimiento = ?",
+                "WHERE id_movimiento = ? AND fecha_salida IS NULL",
                 (salida_db, total, row["id_movimiento"]),
             )
+            if cur.rowcount != 1:
+                conn.rollback()
+                self._log_estacionamiento("Ese ingreso ya fue cerrado desde otra ventana. No se genero otro cobro.", "warn", popup_parent=popup_parent)
+                self._actualizar_activos_est()
+                return
             cur.execute(
-                "INSERT INTO pagos (id_movimiento, monto, metodo) VALUES (?, ?, ?)",
-                (row["id_movimiento"], total, metodo),
+                "INSERT INTO pagos (id_movimiento, monto, metodo, fecha_pago, usuario) VALUES (?, ?, ?, ?, ?)",
+                (row["id_movimiento"], total, metodo, salida_db, self.usuario),
             )
             conn.commit()
             ticket, ticket_error = _emitir_ticket_estacionamiento_seguro(
@@ -14011,6 +14116,8 @@ class VentanaPrincipal(QMainWindow):
             box.exec()
             self.ui.input_patente_est.clear()
             self._actualizar_activos_est()
+        except ValueError as exc:
+            self._log_estacionamiento(str(exc), "warn", popup_parent=popup_parent)
         except sqlite3.Error:
             self._log_estacionamiento(
                 "Error al registrar salida.",
@@ -14046,13 +14153,115 @@ class VentanaPrincipal(QMainWindow):
         self._aplicar_filtros_activos_est()
 
 
+def _programar_verificacion_inicio(app):
+    """Diagnostic only: inspect the normal access screen, never skip authentication."""
+    import json
+    from PySide6.QtGui import QFontDatabase
+
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        for name in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf"):
+            font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / name
+            if font_path.exists():
+                QFontDatabase.addApplicationFont(str(font_path))
+
+    def comprobar():
+        dialogs = [widget for widget in app.topLevelWidgets()
+                   if isinstance(widget, (LoginDialog, FirstUserDialog)) and widget.isVisible()]
+        result = {
+            "ok": len(dialogs) == 1,
+            "demo": app._modo_demo,
+            "tema": "claro" if app._presentation_light else "oscuro",
+            "pantalla": type(dialogs[0]).__name__ if dialogs else None,
+            "db_path": str(app_database.DB_PATH),
+            "integridad": None,
+            "excel": False,
+        }
+        conn = None
+        try:
+            import xlsxwriter
+            result["excel"] = bool(xlsxwriter.__version__)
+            conn = get_connection()
+            result["integridad"] = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            result["usuarios"] = conn.execute("SELECT count(*) FROM usuarios").fetchone()[0]
+            result["clientes"] = conn.execute("SELECT count(*) FROM clientes").fetchone()[0]
+            result["reportes_dir"] = str(_reportes_dir())
+            result["comprobantes_dir"] = str(_comprobantes_dir())
+            result["tickets_dir"] = str(_tickets_salida_dir())
+            if dialogs:
+                dialogs[0].grab().save(str(Path(app_database.DB_PATH).parent / "verificacion_inicio.png"))
+        except Exception as exc:
+            result["ok"] = False
+            result["error"] = type(exc).__name__
+        finally:
+            if conn:
+                conn.close()
+            path = Path(app_database.DB_PATH).parent / "verificacion_inicio.json"
+            path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            for dialog in dialogs:
+                dialog.reject()
+            if not dialogs:
+                app.quit()
+
+    QTimer.singleShot(650, comprobar)
+
+
 if __name__ == "__main__":
-    init_db()
-    app = QApplication(sys.argv)
+    modo_demo = "--demo" in sys.argv
+    verificar_inicio = "--verificar-inicio" in sys.argv
+    if verificar_inicio and (modo_demo or not os.environ.get("ESTACIONAMIENTO_DATA_DIR", "").strip()):
+        # Require a deliberate data directory; diagnostics never target the real
+        # database accidentally and never provide an authenticated session.
+        sys.exit(2)
+    demo_session = None
+    app = QApplication([arg for arg in sys.argv if arg not in {"--demo", "--verificar-inicio"}])
+    respaldo_migracion = None
+    if modo_demo:
+        from demo_muestra import preparar_demo
+        demo_session = preparar_demo()
+    else:
+        try:
+            respaldo_migracion = respaldar_antes_de_migrar()
+            init_db()
+        except (sqlite3.Error, OSError) as exc:
+            apply_application_theme(app, light=True)
+            detalle_inicio = f"Detalle: {exc}\n\nBase: {app_database.DB_PATH}"
+            informacion_inicio = "No se borraron ni repararon automaticamente tus registros.\nRevisa los detalles antes de continuar."
+            if respaldo_migracion:
+                detalle_inicio += f"\nRespaldo previo: {respaldo_migracion}"
+                informacion_inicio += "\nSe conservo un respaldo previo de la base."
+            aviso_inicio = QMessageBox()
+            aviso_inicio.setWindowTitle("Revisar base de datos")
+            aviso_inicio.setIcon(QMessageBox.Critical)
+            aviso_inicio.setText("No se pudo abrir la base de forma segura.")
+            aviso_inicio.setInformativeText(informacion_inicio)
+            aviso_inicio.setDetailedText(detalle_inicio)
+            aviso_inicio.setStandardButtons(QMessageBox.Ok)
+            _traducir_botones_mensaje(aviso_inicio)
+            for boton_inicio in aviso_inicio.findChildren(QPushButton):
+                if "Details" in boton_inicio.text():
+                    boton_inicio.setText("Ver detalles")
+                    boton_inicio.clicked.connect(
+                        lambda checked=False, boton=boton_inicio: boton.setText(
+                            "Ver detalles" if "Show" in boton.text() else "Ocultar detalles"
+                        )
+                    )
+            aviso_inicio.exec()
+            sys.exit(1)
+    app._modo_demo = modo_demo
+    app._demo_session = demo_session
     _aplicar_fuente_aplicacion(app)
     sys.excepthook = _manejar_excepcion_no_controlada
     app._dialog_translation_filter = _DialogTranslationFilter(app)
     app.installEventFilter(app._dialog_translation_filter)
+    if verificar_inicio:
+        _programar_verificacion_inicio(app)
+
+    if modo_demo:
+        ventana = VentanaPrincipal(usuario="demo", rol="DUENO")
+        ventana.show()
+        exit_code = app.exec()
+        demo_session.cleanup()
+        sys.exit(exit_code)
 
     if not _usuarios_existen():
         crear = FirstUserDialog()

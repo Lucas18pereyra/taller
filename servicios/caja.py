@@ -1,6 +1,9 @@
 import sqlite3
+import math
+from datetime import date, datetime
 
 from database import get_connection
+from servicios.validaciones import validar_monto
 
 
 def consultar_totales_dia(fecha_key):
@@ -23,7 +26,7 @@ def consultar_totales_dia(fecha_key):
         )
         estacionamiento = float(cur.fetchone()[0] or 0.0)
     except sqlite3.Error:
-        pass
+        raise
     finally:
         if conn:
             conn.close()
@@ -62,7 +65,7 @@ def consultar_detalle_por_metodo_dia(fecha_key):
                 }
             )
     except sqlite3.Error:
-        return []
+        raise
     finally:
         if conn:
             conn.close()
@@ -93,7 +96,7 @@ def obtener_cierre_caja(fecha_key):
             "fecha_cierre": row["fecha_cierre"] or "",
         }
     except sqlite3.Error:
-        return None
+        raise
     finally:
         if conn:
             conn.close()
@@ -121,7 +124,7 @@ def obtener_cierre_caja_metodos(fecha_key):
             }
         return rows
     except sqlite3.Error:
-        return {}
+        raise
     finally:
         if conn:
             conn.close()
@@ -138,19 +141,48 @@ def guardar_cierre_caja(
 ):
     conn = None
     try:
+        fecha_key = date.fromisoformat(str(fecha_key)).isoformat()
+        total_esperado = validar_monto(total_esperado, permitir_cero=True)
+        total_contado = validar_monto(total_contado, permitir_cero=True)
+        diferencia_calculada = round(total_contado - total_esperado, 2)
+        if not math.isfinite(float(diferencia)) or abs(float(diferencia) - diferencia_calculada) > 0.009:
+            raise ValueError("La diferencia de caja no coincide con los totales.")
+        diferencia = diferencia_calculada
+        if detalle_metodos is not None:
+            detalles_validados = []
+            metodos_vistos = set()
+            for item in detalle_metodos:
+                metodo = str(item.get("metodo") or "").strip() or "Sin metodo"
+                if metodo.casefold() in metodos_vistos:
+                    raise ValueError("Un metodo de pago aparece mas de una vez en el cierre.")
+                metodos_vistos.add(metodo.casefold())
+                esperado = validar_monto(item.get("total_esperado"), permitir_cero=True)
+                contado = validar_monto(item.get("total_contado"), permitir_cero=True)
+                diferencia_metodo = round(contado - esperado, 2)
+                declarado = float(item.get("diferencia"))
+                if not math.isfinite(declarado) or abs(declarado - diferencia_metodo) > 0.009:
+                    raise ValueError("La diferencia por metodo no coincide con los totales.")
+                detalles_validados.append({"metodo": metodo, "total_esperado": esperado,
+                                           "total_contado": contado, "diferencia": diferencia_metodo})
+            if (abs(sum(item["total_esperado"] for item in detalles_validados) - total_esperado) > 0.009
+                    or abs(sum(item["total_contado"] for item in detalles_validados) - total_contado) > 0.009):
+                raise ValueError("El detalle por metodo no coincide con el total del cierre.")
+            detalle_metodos = detalles_validados
+        fecha_cierre = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         conn = get_connection()
+        conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO cierres_caja "
             "(fecha, total_esperado, total_contado, diferencia, observacion, usuario, fecha_cierre) "
-            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(fecha) DO UPDATE SET "
             "total_esperado=excluded.total_esperado, "
             "total_contado=excluded.total_contado, "
             "diferencia=excluded.diferencia, "
             "observacion=excluded.observacion, "
             "usuario=excluded.usuario, "
-            "fecha_cierre=CURRENT_TIMESTAMP",
+            "fecha_cierre=excluded.fecha_cierre",
             (
                 fecha_key,
                 float(total_esperado or 0.0),
@@ -158,6 +190,7 @@ def guardar_cierre_caja(
                 float(diferencia or 0.0),
                 (observacion or "").strip(),
                 (usuario or "sistema").strip() or "sistema",
+                fecha_cierre,
             ),
         )
         if detalle_metodos is not None:
@@ -181,7 +214,7 @@ def guardar_cierre_caja(
                 )
         conn.commit()
         return True
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError, TypeError, OverflowError):
         return False
     finally:
         if conn:
