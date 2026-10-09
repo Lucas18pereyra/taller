@@ -18,6 +18,8 @@ reportes/
 .respaldo_visual/
 preview_visual/
 EstacionamientoApp.exe
+
+# Datos locales y credenciales: no publicar en el repositorio.
 *.db
 *.db-wal
 *.db-shm
@@ -26,3 +28,11 @@ EstacionamientoApp.exe
 .env
 .env.*
 !.env.example
+
+# Preparación de la muestra y copias temporales de sincronización.
+material_muestra/
+.github-sync*/
+
+# El portal descarga su modelo; las capturas de cámara son archivos locales.
+cv2/**/hand_landmarker.task
+cv2/**/captura*.png

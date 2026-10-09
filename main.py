@@ -1,3 +1,6 @@
+# Punto de entrada de la aplicacion de escritorio y coordinador de sus ventanas.
+# Qt construye la interfaz; database abre SQLite; servicios concentra reglas
+# reutilizables para que los distintos formularios no calculen cada cosa a su modo.
 import sys
 import os
 import sqlite3
@@ -82,11 +85,13 @@ from PySide6.QtWidgets import (
     QStyleOptionGraphicsItem,
     QMenu,
 )
+# Ui_MainWindow define los controles base; Presentation aplica la capa visual.
 from ui_ventana_principal import Ui_MainWindow
 import database as app_database
 from database import get_connection, init_db, reset_db
 from presentacion import Presentation, prepare_dialog
 from presentacion_estilos import apply_application_theme, palette as presentation_palette
+# El prefijo svc_ distingue operaciones de negocio de los metodos de la interfaz.
 from servicios.contratos import (
     listar_contratos as svc_listar_contratos,
     obtener_detalle_contrato as svc_obtener_detalle_contrato,
@@ -137,6 +142,7 @@ from servicios.espacios import (
 from servicios.arranque import respaldar_antes_de_migrar
 
 
+# Contexto de sesion: los dialogos buscan el usuario y el rol en sus ventanas padre.
 def _usuario_desde_widget(widget):
     if widget is None:
         return "sistema"
@@ -168,6 +174,7 @@ def _rol_desde_widget(widget):
     return ""
 
 
+# Devuelve una ficha minima del cliente, o None si no existe o falla la consulta.
 def _consultar_estado_cliente(id_cliente):
     if not id_cliente:
         return None
@@ -177,6 +184,7 @@ def _consultar_estado_cliente(id_cliente):
         cur = conn.cursor()
         cur.execute(
             "SELECT id_cliente, nombre, dni, activo "
+            # Los valores viajan como parametros, separados del texto de la consulta.
             "FROM clientes WHERE id_cliente = ?",
             (id_cliente,),
         )
@@ -198,6 +206,7 @@ def _consultar_estado_cliente(id_cliente):
 
 # Deja registro de acciones importantes para no perder trazabilidad
 def _auditar(widget, accion, detalle=""):
+    # La auditoria usa su propia conexion; si falla, no interrumpe la accion principal.
     conn = None
     try:
         conn = get_connection()
@@ -305,6 +314,7 @@ def _confirmar_guardado_pendiente(widget, mensaje):
     )
 
 
+# Traducciones locales para botones de Qt, incluso si el sistema esta en ingles.
 _TEXTOS_BOTONES_MENSAJE = {
     QMessageBox.Ok: "Aceptar",
     QMessageBox.Open: "Abrir",
@@ -385,6 +395,7 @@ def _traducir_botones_widget(widget):
             boton.setText(traducido)
 
 
+# Un filtro global prepara cada dialogo al mostrarse y uniforma idioma y numeros.
 class _DialogTranslationFilter(QObject):
     # Engancha eventos puntuales para que la interfaz responda mejor
     def eventFilter(self, watched, event):
@@ -442,6 +453,7 @@ def _antirebote_finalizar(obj, clave, cooldown_ms=650, on_release=None):
         _liberar()
 
 
+# El mapa origen -> destino decide si Enter mueve el foco o ejecuta una accion.
 class _EnterNavigationFilter(QObject):
     def __init__(self, owner, mapping):
         super().__init__(owner)
@@ -509,6 +521,7 @@ class _EnterNavigationFilter(QObject):
 
 # Hace que Enter vaya guiando el formulario sin cortar el ritmo
 def _instalar_enter_navegacion(owner, mapping):
+    # Conservar la referencia evita que Python descarte el filtro aun en uso por Qt.
     filtros = getattr(owner, "_enter_nav_filters", None)
     if filtros is None:
         filtros = []
@@ -518,6 +531,7 @@ def _instalar_enter_navegacion(owner, mapping):
     return filtro
 
 
+# Formatos de presentacion: fechas legibles y numeros segun la region argentina.
 def _parse_fecha_db(valor):
     return svc_parse_fecha_db(valor)
 
@@ -529,6 +543,7 @@ def _fmt_fecha_hora_local(valor):
     return dt.strftime("%d/%m/%Y %H:%M:%S")
 
 
+# Usa punto para miles y coma para decimales; admite separadores al editar numeros.
 _LOCALE_ES_AR = QLocale(QLocale.Spanish, QLocale.Argentina)
 try:
     _LOCALE_ES_AR.setNumberOptions(
@@ -551,6 +566,7 @@ def _fmt_money(valor, decimales=2):
 
 
 def _configurar_spinbox_numerico(spinbox):
+    # Ademas del formato al perder el foco, agrupa los miles mientras se escribe.
     if spinbox is None:
         return
     try:
@@ -561,6 +577,7 @@ def _configurar_spinbox_numerico(spinbox):
         spinbox.setGroupSeparatorShown(True)
     except Exception:
         pass
+    # La propiedad impide conectar la misma señal varias veces al preparar un dialogo.
     if not spinbox.property("formatoMilesInstalado"):
         spinbox.setProperty("formatoMilesInstalado", True)
         editor = spinbox.lineEdit()
@@ -569,11 +586,13 @@ def _configurar_spinbox_numerico(spinbox):
 
 def _agrupar_numero_editado(editor, texto, documento=False):
     """Agrupa miles mientras se escribe, sin perder decimales ni el cursor."""
+    # Cuenta digitos, no caracteres: los puntos nuevos no deben desplazar la edicion.
     cursor = editor.cursorPosition()
     digitos_izquierda = sum(c.isdigit() for c in texto[:cursor])
     if documento:
         formateado = _formatear_documento(texto)
     else:
+        # Solo se agrupa la parte entera; la fraccion decimal se conserva tal cual.
         partes = texto.split(",", 1)
         entero = partes[0]
         if any(c not in "0123456789.-" for c in entero):
@@ -605,6 +624,7 @@ def _horas_cobradas_con_tolerancia(segundos, tolerancia_min=15):
 
 # De este calculo sale el cobro real del estacionamiento
 def _calcular_total_estadia(dt_ingreso, dt_salida, tarifa_hora, tolerancia_min=15):
+    # La regla vive en servicios.cobro; esta funcion mantiene una entrada comun para UI.
     return svc_calcular_total_estadia(
         dt_ingreso,
         dt_salida,
@@ -613,6 +633,7 @@ def _calcular_total_estadia(dt_ingreso, dt_salida, tarifa_hora, tolerancia_min=1
     )
 
 
+# Normalizacion interna: la base y los servicios trabajan con estos tres codigos.
 def _normalizar_tipo_vehiculo(tipo):
     txt = (tipo or "").strip().upper()
     if txt in ("MOTO", "MOTOCICLETA"):
@@ -631,6 +652,7 @@ def _texto_tipo_vehiculo(tipo):
     return "Auto"
 
 
+# Separa el dato util del formato visual (por ejemplo, los puntos de un DNI).
 def _solo_digitos(texto):
     return "".join(ch for ch in str(texto or "") if ch.isdigit())
 
@@ -650,6 +672,7 @@ def _dni_longitud_valida(texto):
     return 6 < cantidad < 9
 
 
+# Agrupa desde la derecha sin convertir a numero, conservando ceros iniciales.
 def _formatear_documento(texto):
     digitos = _solo_digitos(texto)
     if not digitos:
@@ -663,6 +686,7 @@ def _formatear_documento(texto):
     return ".".join(grupos)
 
 
+# Las comparaciones usan patentes sin espacios ni signos y con letras mayusculas.
 def _normalizar_patente(texto):
     return "".join(ch for ch in str(texto or "").strip().upper() if ch.isalnum())
 
@@ -679,6 +703,7 @@ def _formatear_patente(texto):
     return patente
 
 
+# Comprueba la estructura escrita; no consulta si la patente existe en un registro.
 def _patente_formato_valido(texto):
     patente = _normalizar_patente(texto)
     if not patente:
@@ -690,6 +715,7 @@ def _patente_formato_valido(texto):
     )
 
 
+# Estacionamiento tambien admite el formato de moto de una letra y tres letras finales.
 def _patente_est_formato_valido(texto):
     patente = _normalizar_patente(texto)
     if not patente:
@@ -702,6 +728,7 @@ def _patente_est_formato_valido(texto):
     )
 
 
+# Deduccion por formato para orientar la seleccion del tipo, no por modelo del vehiculo.
 def _patente_es_moto(texto):
     patente = _normalizar_patente(texto)
     if not patente:
@@ -725,6 +752,7 @@ def _formatear_patente_estacionamiento(texto):
     return _formatear_patente(texto)
 
 
+# Prepara el numero para abrir WhatsApp; aqui no se envian mensajes automaticamente.
 def _telefono_a_whatsapp(telefono):
     texto = str(telefono or "").strip()
     if not texto:
@@ -765,6 +793,7 @@ def _sanitizar_template_whatsapp(texto):
 
 # Arma el texto final con los datos reales del cliente
 def _render_mensaje_whatsapp(nombre, vencimiento, deuda, modelo="", patente=""):
+    # La plantilla guardada acepta las variables conocidas; si falla, usa la predeterminada.
     plantilla = _sanitizar_template_whatsapp(
         _config_get("wa_recordatorio_template", _plantilla_whatsapp_default())
     )
@@ -815,6 +844,7 @@ def _nombre_cliente_valido(texto):
     return bool(re.fullmatch(r"[A-Za-zÁÉÍÓÚáéíóúÑñÜü' -]+", valor))
 
 
+# Dibuja un distintivo local con Qt, sin descargar una imagen de Internet.
 def _icono_whatsapp(size=18):
     size = max(14, int(size or 18))
     pix = QPixmap(size, size)
@@ -842,6 +872,7 @@ def _fecha_contrato_qdate(valor):
 
 # Separa contratos activos, vencidos o historicos para mostrarlos bien
 def _clasificar_contrato_vista(row, hoy=None):
+    # Es una clasificacion para mostrar: no renueva, desactiva ni modifica contratos.
     hoy = hoy or QDate.currentDate()
     en_historial = int(row.get("en_historial") or 0) == 1
     activo = int(row.get("activo") or 0) == 1
@@ -886,6 +917,7 @@ def _tarifa_hora_desde_row(row, tipo_vehiculo="AUTO"):
         _to_float(row["precio_hora_camioneta"]) if "precio_hora_camioneta" in row.keys() else None
     )
 
+    # Si falta el importe especifico, busca un precio positivo en las columnas alternativas.
     if tipo_norm == "MOTO":
         return moto or base or auto or camioneta
     if tipo_norm == "CAMIONETA":
@@ -921,6 +953,7 @@ def _tarifa_mensual_desde_row(row, tipo_vehiculo="AUTO"):
     return auto or base or camioneta
 
 
+# Configuracion persistente clave/valor: datos del negocio, rutas y preferencias de UI.
 def _config_get(clave, default=""):
     conn = None
     try:
@@ -941,6 +974,7 @@ def _config_get(clave, default=""):
             conn.close()
 
 
+# Inserta la clave o reemplaza su valor; devuelve False si SQLite rechaza el guardado.
 def _config_set(clave, valor):
     conn = None
     try:
@@ -959,6 +993,7 @@ def _config_set(clave, valor):
             conn.close()
 
 
+# Admite valores antiguos y actuales de preferencias booleanas guardadas como texto.
 def _config_get_bool(clave, default=True):
     valor = str(_config_get(clave, "1" if default else "0") or "").strip().lower()
     return valor not in ("", "0", "false", "no", "off")
@@ -979,6 +1014,7 @@ def _ui_tamano_texto():
     return alias.get(valor, "grande")
 
 
+# La preferencia cambia fuentes y medidas para mantener proporcionados los controles.
 def _ui_factor_escala():
     return {
         "normal": 1.0,
@@ -1003,6 +1039,7 @@ def _aplicar_fuente_aplicacion(app=None):
     app = app or QApplication.instance()
     if app is None:
         return
+    # Escalar siempre desde la fuente original evita agrandarla otra vez en cada cambio.
     base = getattr(app, "_base_font_ui", None)
     if base is None:
         base = QFont(app.font())
@@ -1022,6 +1059,7 @@ def _aplicar_fuente_aplicacion(app=None):
     apply_application_theme(app, light=app._presentation_light, scale=factor)
 
 
+# Reglas visuales del modo sencillo; los nombres de objeto vinculan cada selector a su control.
 def _estilo_modo_sencillo():
     info_font_px = _ui_escalar_px(12, minimo=12)
     if _tema_claro_activo():
@@ -1241,6 +1279,7 @@ def _estilo_modo_sencillo():
     """.replace("__INFO_FONT__", str(info_font_px))
 
 
+# Las listas de tipos permitidos se construyen por separado para cada modalidad.
 def _tipos_vehiculo_config_estacionamiento():
     tipos = []
     if _config_get_bool("est_perm_auto", True):
@@ -1284,9 +1323,11 @@ def _escritorio_base_actual():
     return candidatos[0]
 
 
+# Prioriza la ruta elegida por el usuario y prueba alternativas si no puede crearla.
 def _resolver_directorio_app(clave_config, fallback_relativo):
     valor = (_config_get(clave_config, "") or "").strip()
     # User files must live beside the database, not in PyInstaller's temp bundle.
+    # En la version ejecutable, la carpeta temporal del programa no guarda documentos duraderos.
     app_dir = Path(app_database.DB_PATH).resolve().parent
     candidatos = []
 
@@ -1329,6 +1370,7 @@ def _comprobantes_dir():
     return _resolver_directorio_app("dir_comprobantes", "comprobantes")
 
 
+# Sin carpeta personalizada, los tickets de salida quedan dentro de comprobantes.
 def _tickets_salida_dir():
     valor = (_config_get("dir_tickets_salida", "") or "").strip()
     if valor:
@@ -1338,6 +1380,7 @@ def _tickets_salida_dir():
     return carpeta
 
 
+# Acepta fechas provenientes de SQLite y textos ya formateados para la interfaz.
 def _parse_datetime_local(valor):
     texto = str(valor or "").strip()
     if not texto:
@@ -1357,6 +1400,7 @@ def _parse_datetime_local(valor):
     return None
 
 
+# Construye nombres de archivo simples, quitando acentos y signos del nombre del cliente.
 def _slug_archivo(texto):
     base = unicodedata.normalize("NFKD", str(texto or ""))
     base = base.encode("ascii", "ignore").decode("ascii")
@@ -1383,6 +1427,7 @@ def _mes_texto_archivo(valor_fecha):
     return f"{meses[max(0, min(11, dt.month - 1))]}_{dt.year}"
 
 
+# Agrega un sufijo numerico antes de escribir para no pisar comprobantes ya existentes.
 def _path_unico(base_path):
     path = Path(base_path)
     if not path.exists():
@@ -1398,6 +1443,7 @@ def _path_unico(base_path):
         idx += 1
 
 
+# En Windows intenta seleccionar el archivo; como alternativa abre su carpeta.
 def _mostrar_en_explorador(path):
     if not path:
         return False
@@ -1427,6 +1473,7 @@ def _mostrar_en_explorador(path):
         return False
 
 
+# Solicita al sistema abrir el documento y recurre al explorador si no lo consigue.
 def _abrir_archivo_local(path):
     archivo = Path(path).resolve()
     if not archivo.exists():
@@ -1471,6 +1518,7 @@ def _abrir_ticket_o_avisar(parent, path):
     return False
 
 
+# Generacion de documentos: recibe pares (etiqueta, valor) y los dibuja en una hoja A4.
 def _generar_comprobante_pdf(path, titulo, lineas, subtitulo=None):
     lineas = [
         (str(label or "").strip(), str(value or "").strip())
@@ -1544,6 +1592,7 @@ def _generar_comprobante_pdf(path, titulo, lineas, subtitulo=None):
         total_h = 18.0
         filas_medidas = []
 
+        # Mide el texto antes de dibujarlo para dar mas altura a valores de varias lineas.
         for label, value in lineas:
             painter.setFont(font_valor)
             rect_valor = painter.boundingRect(
@@ -1621,6 +1670,7 @@ def _generar_comprobante_pdf(path, titulo, lineas, subtitulo=None):
         painter.end()
 
 
+# Formato angosto de ticket: estima el largo del papel a partir del contenido recibido.
 def _generar_ticket_pdf(path, titulo, lineas, ancho_mm=80.0, subtitulo=None):
     lineas = [
         (str(label or "").strip(), str(value or "").strip())
@@ -1724,6 +1774,7 @@ def _generar_ticket_pdf(path, titulo, lineas, ancho_mm=80.0, subtitulo=None):
         painter.end()
 
 
+# Reune datos de cliente y contrato del ultimo pago para componer el comprobante mensual.
 def _emitir_comprobante_cochera(id_contrato, monto, metodo, meses, nueva_venc):
     pago = _ultimo_pago_contrato(id_contrato)
     if not pago:
@@ -1772,6 +1823,7 @@ def _emitir_comprobante_cochera(id_contrato, monto, metodo, meses, nueva_venc):
     return path
 
 
+# Une el pago con cliente, espacio y vehiculo; ante fechas iguales desempata por id_pago.
 def _ultimo_pago_contrato(id_contrato):
     if not id_contrato:
         return None
@@ -1804,6 +1856,7 @@ def _ultimo_pago_contrato(id_contrato):
             conn.close()
 
 
+# Reemite un PDF a partir de un pago existente, sin registrar un cobro nuevo.
 def _emitir_comprobante_ultimo_pago_contrato(id_contrato):
     pago = _ultimo_pago_contrato(id_contrato)
     if not pago:
@@ -1850,6 +1903,7 @@ def _emitir_comprobante_ultimo_pago_contrato(id_contrato):
     return path, pago
 
 
+# Recibe el resumen ya calculado por la pantalla y lo transforma en un documento.
 def _emitir_estado_cuenta_pdf(data):
     data = data or {}
     cliente = (data.get("cliente") or "").strip() or "cliente"
@@ -1918,6 +1972,7 @@ def _emitir_estado_cuenta_pdf(data):
     return path
 
 
+# Confirmacion del resultado con acceso al archivo, solo si hay una ruta disponible.
 def _mostrar_resultado_comprobante(parent, titulo, mensaje, path=None):
     path_txt = str(path or "").strip()
     if not path_txt:
@@ -1945,12 +2000,14 @@ def _mostrar_resultado_comprobante(parent, titulo, mensaje, path=None):
     box.exec()
 
 
+# Solo admite eliminar un contrato inactivo sin pagos; los cobros historicos se conservan.
 def _eliminar_contrato_definitivo(id_contrato):
     if not id_contrato:
         return {"ok": False, "pagos": 0, "id_espacio": None}
     conn = None
     try:
         conn = get_connection()
+        # Reserva la escritura antes de comprobar el contrato y quitar su vinculacion.
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.cursor()
         cur.execute("SELECT id_espacio, id_cliente, activo FROM cochera_contratos WHERE id_contrato=?", (id_contrato,))
@@ -1982,6 +2039,7 @@ def _eliminar_contrato_definitivo(id_contrato):
             conn.close()
 
 
+# El comprobante recibe el cobro ya calculado: no vuelve a consultar la tarifa vigente.
 def _emitir_comprobante_estacionamiento(
     patente,
     espacio,
@@ -2017,6 +2075,7 @@ def _emitir_comprobante_estacionamiento(
     return path
 
 
+# Un mismo generador cubre ingreso y salida; agrega importes solo cuando son suministrados.
 def _emitir_ticket_estacionamiento(
     evento,
     patente,
@@ -2076,6 +2135,7 @@ def _emitir_ticket_estacionamiento(
     return path
 
 
+# Convierte fallos de generacion en un resultado (ruta, error) que la pantalla puede informar.
 def _emitir_ticket_estacionamiento_seguro(**kwargs):
     try:
         path = Path(_emitir_ticket_estacionamiento(**kwargs)).resolve()
@@ -2088,6 +2148,8 @@ def _emitir_ticket_estacionamiento_seguro(**kwargs):
         return None, str(exc)
 
 
+# ACCESO: este diálogo obtiene la identidad y el rol que usará la ventana principal.
+# accept() indica un acceso confirmado; cerrar o cancelar no inicia una sesión.
 class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2130,6 +2192,8 @@ class LoginDialog(QDialog):
         self.input_usuario.setFocus()
 
     def _intentar_login(self):
+        # Se consulta el usuario con parámetros SQL y se exige que siga activo.
+        # La comparación de contraseña corresponde al almacenamiento actual de la app.
         usuario = self.input_usuario.text().strip()
         password = self.input_password.text()
 
@@ -2172,6 +2236,7 @@ class LoginDialog(QDialog):
                 conn.close()
 
 
+# ALTA INICIAL: cuando no existen usuarios, se crea la primera cuenta DUENO.
 class FirstUserDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2223,6 +2288,7 @@ class FirstUserDialog(QDialog):
         )
 
     def _crear_usuario(self):
+        # Antes de insertar, se validan las longitudes y la repetición de contraseña.
         usuario = self.input_usuario.text().strip()
         password = self.input_password.text()
         password2 = self.input_password2.text()
@@ -2294,6 +2360,7 @@ class FirstUserDialog(QDialog):
                 conn.close()
 
 
+# ADMINISTRACIÓN DE CUENTAS: listado, operadores, activación y contraseñas.
 class UsuariosDialog(QDialog):
     def __init__(self, parent=None, usuario_actual=None):
         super().__init__(parent)
@@ -2656,6 +2723,7 @@ class UsuariosDialog(QDialog):
         event.accept()
 
 
+# Presenta los datos bancarios del negocio y permite copiarlos al portapapeles.
 class DatosTransferenciaDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2726,6 +2794,7 @@ class DatosTransferenciaDialog(QDialog):
         )
 
 
+# Consulta los pagos de un contrato para revisar sus importes y comprobantes.
 class HistorialPagosContratoDialog(QDialog):
     def __init__(self, id_contrato, parent=None):
         super().__init__(parent)
@@ -2831,6 +2900,7 @@ class HistorialPagosContratoDialog(QDialog):
         )
 
 
+# Formulario compacto de ingreso: recoge los datos que procesará la ventana principal.
 class IngresoRapidoEstDialog(QDialog):
     def __init__(self, tipos_disponibles, parent=None):
         super().__init__(parent)
@@ -2967,6 +3037,7 @@ class IngresoRapidoEstDialog(QDialog):
         }
 
 
+# Calculadora auxiliar: muestra el vuelto a partir del total y el efectivo recibido.
 class CalcularVueltoDialog(QDialog):
     def __init__(self, total, parent=None):
         super().__init__(parent)
@@ -3046,6 +3117,7 @@ class CalcularVueltoDialog(QDialog):
             )
 
 
+# Selector de vehículos con ingreso abierto para las acciones del modo sencillo.
 class ActivosEstacionamientoDialog(QDialog):
     def __init__(self, filas, permitir_salida=False, metodos_disponibles=None, parent=None):
         super().__init__(parent)
@@ -3154,6 +3226,8 @@ class ActivosEstacionamientoDialog(QDialog):
         return item.data(Qt.UserRole) or ""
 
 
+# Vista de operación rápida del estacionamiento; reutiliza ingreso y salida de la
+# ventana principal para que ambas pantallas apliquen el mismo procedimiento.
 class ModoSencilloEstacionamientoDialog(QDialog):
     def __init__(self, ventana_principal, parent=None):
         super().__init__(None)
@@ -3367,6 +3441,8 @@ class ModoSencilloEstacionamientoDialog(QDialog):
             super().closeEvent(event)
 
 
+# CONTRATOS MENSUALES: vincula cliente, vehículo y cochera con su monto y vencimiento.
+# Crear el contrato y registrar su primer pago son acciones separadas.
 class ContratosDialog(QDialog):
     def __init__(self, parent=None, rol=None):
         super().__init__(parent)
@@ -3559,6 +3635,7 @@ class ContratosDialog(QDialog):
             self.btn_eliminar.setEnabled(False)
 
     def _snapshot_form(self):
+        # Copia los valores del formulario para detectar cambios pendientes al cerrarlo.
         return {
             "dni": _solo_digitos(self.input_dni.text().strip()),
             "patente": self.input_patente.text().strip().upper(),
@@ -3595,6 +3672,8 @@ class ContratosDialog(QDialog):
         return self._snapshot_form() != base
 
     def _sugerir_espacio_libre(self):
+        # Sólo completa un código vacío: conserva la elección manual del usuario.
+        # Busca una cochera activa sin cliente, contrato activo ni ingreso abierto.
         if self.input_espacio.text().strip():
             return
         conn = None
@@ -3619,6 +3698,8 @@ class ContratosDialog(QDialog):
                 conn.close()
 
     def _elegir_espacio_mapa(self):
+        # El mapa se abre como selector, sin permitir editar su distribución.
+        # La disponibilidad se vuelve a consultar al confirmar la casilla elegida.
         dialog = MapaCocheraDialog(self, editable=False)
         dialog.setWindowTitle("Elegir cochera para el contrato")
         elegir = QPushButton("Elegir espacio seleccionado")
@@ -4333,6 +4414,8 @@ class ContratosDialog(QDialog):
         self._actualizar_snapshot_form()
 
     def _crear_contrato(self):
+        # Recoge el monto introducido y comprueba cliente, patente y lugar antes
+        # de crear el contrato pendiente de activación mediante su primer pago.
         dni = self._formatear_input_dni()
         if not self.input_espacio.text().strip():
             self._sugerir_espacio_libre()
@@ -4537,6 +4620,8 @@ class ContratosDialog(QDialog):
                 "VALUES (?, ?, ?, ?, ?, 0, 0)",
                 (id_cliente, id_vehiculo, id_espacio, fecha_venc, monto),
             )
+            # activo=0 y en_historial=0 identifican el contrato recién creado,
+            # todavía pendiente; el primer pago se procesa en otra acción.
             conn.commit()
             _auditar(
                 self,
@@ -4601,6 +4686,8 @@ class ContratosDialog(QDialog):
         self._renovar_pago()
 
     def _registrar_pago(self):
+        # El primer pago activa un contrato pendiente, sin extender su vencimiento.
+        # Se consulta nuevamente la ocupación antes de delegar el registro al servicio.
         id_contrato, _ = self._selected_ids()
         if not id_contrato:
             QMessageBox.warning(
@@ -4709,6 +4796,8 @@ class ContratosDialog(QDialog):
 
             try:
                 resultado = svc_registrar_primer_pago_contrato(id_contrato, monto, metodo)
+                # El servicio registra la operación; el diálogo actualiza la lista
+                # y prepara el comprobante con el vencimiento devuelto.
                 fecha_venc_str = resultado.get("fecha_vencimiento") or fecha_venc_str
                 _auditar(
                     self,
@@ -4748,6 +4837,8 @@ class ContratosDialog(QDialog):
             )
 
     def _renovar_pago(self):
+        # Renueva un contrato activo: solicita meses, importe y método de pago.
+        # El servicio calcula el nuevo vencimiento y registra la renovación.
         id_contrato, _ = self._selected_ids()
         if not id_contrato:
             QMessageBox.warning(
@@ -4858,6 +4949,8 @@ class ContratosDialog(QDialog):
             )
 
     def _baja(self):
+        # Da de baja sin borrar el contrato: lo envía al historial y libera su
+        # asignación si no quedan contratos activos ni vehículos en ese lugar.
         id_contrato, _id_espacio_seleccionado = self._selected_ids()
         if not id_contrato:
             QMessageBox.warning(self, "Contrato", "Selecciona un contrato de la lista para darlo de baja.")
@@ -5018,6 +5111,7 @@ class ContratosDialog(QDialog):
             )
 
 
+# Consulta de contratos archivados, con acciones de reactivación o eliminación.
 class HistorialContratosDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5188,6 +5282,7 @@ class HistorialContratosDialog(QDialog):
         self._actualizar_estado_acciones()
 
     def _reactivar(self):
+        # Reactivar lo devuelve al listado como INACTIVO; requiere un pago para activarse.
         id_contrato = self._selected_contrato_id()
         if not id_contrato:
             QMessageBox.warning(
@@ -5302,6 +5397,7 @@ class HistorialContratosDialog(QDialog):
             _mostrar_error(self, "Error", "No se pudo eliminar el contrato.")
 
 
+# Solicita importe y método para el primer pago que activa una cochera.
 class PagoActivacionDialog(QDialog):
     def __init__(self, monto_base, parent=None):
         super().__init__(parent)
@@ -5348,6 +5444,7 @@ class PagoActivacionDialog(QDialog):
         return float(self.input_monto.value()), self.combo_metodo.currentText()
 
 
+# Formulario de renovación: propone el importe según meses y permite ajustarlo.
 class PagoCocheraDialog(QDialog):
     def __init__(self, monto_base, parent=None):
         super().__init__(parent)
@@ -5422,6 +5519,8 @@ class PagoCocheraDialog(QDialog):
         )
 
 
+# CLIENTES Y VEHÍCULOS: administra los datos personales y las patentes asociadas.
+# Los identificadores guardados en las tablas conectan la selección con la base.
 class ClientesDialog(QDialog):
     def __init__(self, parent=None, rol=None):
         super().__init__(parent)
@@ -6115,6 +6214,7 @@ class ClientesDialog(QDialog):
         return dni
 
     def _guardar_cliente(self):
+        # Valida los datos del formulario antes de crear o actualizar al cliente.
         dni = self._formatear_input_dni()
         nombre = " ".join(self.input_nombre.text().strip().split())
         direccion = self.input_direccion.text().strip()
@@ -6261,6 +6361,8 @@ class ClientesDialog(QDialog):
                 conn.close()
 
     def _eliminar_cliente(self):
+        # La eliminación exige permiso DUENO y ausencia de contratos o movimientos.
+        # Se comprueban las dependencias dentro de la transacción de escritura.
         if (self.rol or "").strip().upper() != "DUENO":
             QMessageBox.warning(self, "Permiso", "Solo DUENO puede eliminar clientes.")
             return
@@ -6369,6 +6471,8 @@ class ClientesDialog(QDialog):
                 self.combo_tipo_vehiculo.setCurrentIndex(idx)
 
     def _agregar_vehiculo(self):
+        # Normaliza la patente y asocia el vehículo al cliente activo seleccionado.
+        # La restricción de unicidad de la base evita registrar la misma patente dos veces.
         if not self._validar_cliente_activo_seleccionado("agregar vehiculos"):
             return
         cliente_id = self._selected_cliente_id()
@@ -6462,6 +6566,7 @@ class ClientesDialog(QDialog):
             _antirebote_finalizar(self, "clientes_agregar_vehiculo", cooldown_ms=650)
 
     def _eliminar_vehiculo(self):
+        # Conserva las patentes con contratos o movimientos para mantener su historial.
         if not self._validar_cliente_activo_seleccionado("eliminar vehiculos"):
             return
         row = self.vehiculos_table.currentRow()
@@ -6715,6 +6820,7 @@ class ClientesDialog(QDialog):
         )
 
 
+# ESTADO DE CUENTA: reúne contratos y pagos del cliente y permite exportarlos a PDF.
 class EstadoCuentaDialog(QDialog):
     def __init__(self, id_cliente, parent=None):
         super().__init__(parent)
@@ -7062,6 +7168,7 @@ class EstadoCuentaDialog(QDialog):
         )
 
 
+# TARIFAS: edita precios por tipo de vehículo y conserva versiones anteriores.
 class TarifaDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -7291,6 +7398,7 @@ class TarifaDialog(QDialog):
             conn = get_connection()
             cur = conn.cursor()
             cur.execute("UPDATE tarifas SET activa = 0 WHERE activa = 1")
+            # Se inserta una nueva versión activa en lugar de sobrescribir la anterior.
             cur.execute(
                 "INSERT INTO tarifas ("
                 "precio_hora, precio_mensual, precio_mensual_auto, precio_mensual_camioneta, "
@@ -7357,6 +7465,8 @@ class TarifaDialog(QDialog):
             event.ignore()
 
 
+# CASILLA DEL MAPA: combina geometría, código, estado, color y texto de un lugar.
+# QGraphicsScene controla su selección y los cambios de posición.
 class EspacioItem(QGraphicsRectItem):
     def __init__(self, codigo, rect, color, estado="LIBRE", grid=10):
         super().__init__(rect)
@@ -7441,6 +7551,8 @@ class EspacioItem(QGraphicsRectItem):
         self.label.setPos(x, y)
 
     def itemChange(self, change, value):
+        # Antes de aceptar una posición, aplica cuadrícula y ajuste a casillas vecinas.
+        # Después del movimiento marca el mapa como modificado, salvo durante su carga.
         if change == QGraphicsItem.ItemPositionChange and self.scene():
             pos = value
             rect = self.rect()
@@ -7550,6 +7662,7 @@ class EspacioItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
 
+# Editor de los colores que representan cochera, ocupación y disponibilidad.
 class ColoresMapaDialog(QDialog):
     def __init__(self, color_cochera, color_ocupado, color_libre, parent=None):
         super().__init__(parent)
@@ -7664,6 +7777,8 @@ class ColoresMapaDialog(QDialog):
         super().reject()
 
 
+# MAPA: carga la distribución guardada y mantiene los cambios de edición en la escena.
+# editable=False permite consultar o elegir lugares sin modificar el mapa.
 class MapaCocheraDialog(QDialog):
     def __init__(self, parent=None, editable=True):
         super().__init__(parent)
@@ -7857,6 +7972,7 @@ class MapaCocheraDialog(QDialog):
         self._repintar_guias()
 
     def _snap_a_cuadricula(self, x, y):
+        # Redondea las coordenadas al paso de la cuadrícula cuando el alineado está activo.
         if not bool(self.scene.property("snap_enabled")):
             return float(x), float(y)
         paso_x_prop = self.scene.property("snap_step_x")
@@ -8166,6 +8282,7 @@ class MapaCocheraDialog(QDialog):
         if item.codigo_original:
             try:
                 svc_comprobar_eliminacion_espacio(item.codigo_original)
+                # Un lugar vinculado a datos en uso no se puede quitar del mapa.
             except ValueError as exc:
                 QMessageBox.warning(self, "Lugar vinculado", str(exc))
                 return
@@ -8184,6 +8301,7 @@ class MapaCocheraDialog(QDialog):
             return
         if item.codigo_original:
             self._eliminados.add(item.codigo_original)
+        # Se quita de la escena; la persistencia se realiza al pulsar Guardar.
         self.scene.removeItem(item)
         self._set_mapa_dirty(True)
         QMessageBox.information(
@@ -8424,6 +8542,7 @@ class MapaCocheraDialog(QDialog):
             self._set_mapa_dirty(False)
 
     def _recargar(self):
+        # Recarga la distribución persistida; confirma antes de descartar una edición.
         if self._editable and self._mapa_tiene_cambios():
             respuesta = QMessageBox.question(
                 self,
@@ -8465,6 +8584,7 @@ class MapaCocheraDialog(QDialog):
         try:
             conn = get_connection()
             svc_comprobar_tipo_espacio(conn.cursor(), item.codigo_original or codigo, reservado)
+            # La comprobación se hace antes de cambiar la clasificación visual.
         except ValueError as exc:
             QMessageBox.warning(self, "Cochera", str(exc))
             return
@@ -8613,6 +8733,8 @@ class MapaCocheraDialog(QDialog):
                               "es_reservado": item.es_reservado,
                               "x": pos.x(), "y": pos.y(), "w": rect.width(), "h": rect.height()})
             svc_guardar_mapa(items, self._eliminados)
+            # Tras guardar, los códigos actuales pasan a ser la referencia original
+            # para distinguir nuevos cambios, renombres y eliminaciones pendientes.
             for item in self.scene.items():
                 if isinstance(item, EspacioItem):
                     item.codigo_original = item.codigo
@@ -8652,6 +8774,7 @@ class MapaCocheraDialog(QDialog):
         else:
             event.ignore()
 
+# VENCIMIENTOS: organiza contratos por fecha y prepara recordatorios de WhatsApp.
 class VencimientosDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8889,6 +9012,8 @@ class VencimientosDialog(QDialog):
         }
 
     def _abrir_whatsapp_resumen(self, resumen):
+        # Prepara teléfono y mensaje y abre WhatsApp mediante una URL.
+        # Abrir el chat no confirma que el usuario haya enviado el recordatorio.
         numero = _telefono_a_whatsapp(resumen.get("telefono"))
         if not numero:
             return False, "sin_numero"
@@ -9066,6 +9191,7 @@ class VencimientosDialog(QDialog):
         self._enviar_whatsapp_lote_desde_filas(filas, "vence hoy")
 
     def _enviar_whatsapp_lote_desde_filas(self, filas, categoria):
+        # Omite teléfonos inválidos y abre los chats con pequeños intervalos entre ellos.
         if not filas:
             QMessageBox.information(
                 self,
@@ -9115,6 +9241,7 @@ class VencimientosDialog(QDialog):
             return
 
         for idx, url in enumerate(urls):
+            # u=url conserva la URL de esta iteración hasta que se ejecute el temporizador.
             QTimer.singleShot(idx * 350, lambda u=url: QDesktopServices.openUrl(u))
         for resumen, numero in auditables:
             _auditar(
@@ -9254,6 +9381,7 @@ class VencimientosDialog(QDialog):
         self._actualizar_estado_acciones()
 
 
+# Historial de auditoría: muestra las acciones registradas por los usuarios.
 class HistorialDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -9343,6 +9471,7 @@ class HistorialDialog(QDialog):
             self.table.setItem(0, 0, item)
 
 
+# REPORTES: consulta ingresos de cochera y estacionamiento, filtra y exporta a Excel.
 class ReportesDialog(QDialog):
     def __init__(self, parent=None, tipo_inicial="Todos"):
         super().__init__(parent)
@@ -9473,6 +9602,7 @@ class ReportesDialog(QDialog):
         return self._detalle_filtrado_cache[row]
 
     def _periodo(self):
+        # Corrige un rango invertido y devuelve fechas en el formato utilizado en la base.
         desde = self.input_desde.date()
         hasta = self.input_hasta.date()
         if desde.toJulianDay() > hasta.toJulianDay():
@@ -9616,6 +9746,8 @@ class ReportesDialog(QDialog):
         )
 
     def _eliminar_reporte(self):
+        # La acción elimina una operación de estacionamiento y su pago, no una fila visual.
+        # Por ese efecto se exige DUENO y confirmación; no se aplica a pagos de cochera.
         if getattr(self, "_error_carga", None):
             QMessageBox.warning(self, "Reportes no disponibles", "Actualiza y verifica los pagos antes de eliminar una operacion.")
             return
@@ -9725,6 +9857,8 @@ class ReportesDialog(QDialog):
                 conn.close()
 
     def _exportar_excel(self):
+        # Exporta el detalle filtrado y genera hojas de resumen, métodos y fechas.
+        # Los importes se escriben como números para poder trabajar con ellos en Excel.
         if getattr(self, "_error_carga", None):
             QMessageBox.warning(self, "Reportes no disponibles", "No se puede exportar un reporte cuya lectura fallo. Pulsa Actualizar y verifica los datos.")
             return
@@ -10039,6 +10173,8 @@ class ReportesDialog(QDialog):
                 )
 
 
+# CAJA: compara ingresos registrados con importes contados por método de pago.
+# El cierre conserva el detalle ingresado y las observaciones de la jornada.
 class CajaDiariaDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -10423,6 +10559,8 @@ class CajaDiariaDialog(QDialog):
         return self._snapshot_form_cierre() != base
 
     def _guardar_cierre(self, mostrar_mensaje=True):
+        # Reconsulta los ingresos antes de comparar el total esperado con el contado.
+        # Una diferencia exige observación para dejar registrado su motivo.
         if getattr(self, "_error_lectura", False):
             _mostrar_error(self, "Caja no disponible", "No se puede guardar un cierre sin leer los pagos correctamente. Pulsa Actualizar para volver a intentar.")
             return False
@@ -10507,6 +10645,8 @@ class CajaDiariaDialog(QDialog):
         self._actualizar_diferencia()
 
     def _reabrir_cierre(self):
+        # Sólo el dueño puede quitar un cierre guardado, indicando un motivo de reapertura.
+        # Los pagos permanecen; se elimina el cierre para volver a realizar el recuento.
         if getattr(self, "_error_lectura", False):
             _mostrar_error(self, "Caja no disponible", "Actualiza y verifica los datos antes de reabrir un cierre.")
             return
@@ -10603,6 +10743,7 @@ class CajaDiariaDialog(QDialog):
             event.ignore()
 
 
+# RESPALDOS: interfaz para listar, crear, eliminar o restaurar copias de la base.
 class BackupsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -10750,6 +10891,8 @@ class BackupsDialog(QDialog):
             _antirebote_finalizar(self, "backups_eliminar", cooldown_ms=700)
 
     def _restaurar_backup(self):
+        # Pide confirmación del respaldo seleccionado antes de reemplazar la base.
+        # Después cierra la aplicación para iniciar sesión con los datos restaurados.
         path = self._selected_path()
         if not path:
             QMessageBox.warning(self, "Respaldos", "Selecciona un respaldo.")
@@ -10796,6 +10939,7 @@ class BackupsDialog(QDialog):
             _antirebote_finalizar(self, "backups_restaurar", cooldown_ms=1000)
 
 
+# CONFIGURACIÓN: datos del negocio, opciones de interfaz, vehículos y carpetas de salida.
 class ConfiguracionDialog(QDialog):
     def __init__(self, parent=None, rol=None):
         super().__init__(parent)
@@ -11177,6 +11321,7 @@ class ConfiguracionDialog(QDialog):
 
 
 def _usuarios_existen():
+    # Decide si el arranque debe pedir acceso o mostrar el alta del primer dueño.
     conn = None
     try:
         conn = get_connection()
@@ -11190,6 +11335,8 @@ def _usuarios_existen():
             conn.close()
 
 
+# VENTANA PRINCIPAL: conecta navegación, permisos, resumen y operación por hora.
+# La UI base proviene de Ui_MainWindow; Presentation adapta su aspecto visual.
 class VentanaPrincipal(QMainWindow):
     def __init__(self, usuario=None, rol=None):
         super().__init__()
@@ -11199,6 +11346,7 @@ class VentanaPrincipal(QMainWindow):
         self._popup_vencimientos_intentos = 0
         self._popup_primeros_pasos_mostrado = False
         self.ui = Ui_MainWindow()
+        # Primero se crean los widgets; después se conectan acciones y actualizaciones.
         self.ui.setupUi(self)
         self.setWindowTitle("Estacionamiento · Gestión")
         self._ajustar_ui()
@@ -11217,6 +11365,7 @@ class VentanaPrincipal(QMainWindow):
         self._presentacion = Presentation(self)
 
     def _ajustar_ui(self):
+        # Define dimensiones iniciales y el estilo oscuro que se conserva como alternativa.
         self.resize(1280, 720)
         self.setMinimumSize(1024, 600)
         self.setStyleSheet(
@@ -11489,6 +11638,7 @@ class VentanaPrincipal(QMainWindow):
         )
 
     def _estilo_claro(self):
+        # Devuelve reglas QSS: colores y estados visuales, sin consultar datos del negocio.
         return """
             QMainWindow, QDialog {
                 background-color: #eef2f7;
@@ -11840,6 +11990,8 @@ class VentanaPrincipal(QMainWindow):
         self.move(marco.topLeft())
 
     def _aplicar_preferencias_ui(self):
+        # Reaplica tema, tamaño de texto y resolución leídos de configuración.
+        # También adapta los elementos añadidos a la UI generada.
         app = QApplication.instance()
         _aplicar_fuente_aplicacion(app)
         if app is not None:
@@ -12200,6 +12352,7 @@ class VentanaPrincipal(QMainWindow):
             self._presentacion.apply_preferences()
 
     def _configurar_iconos_acciones(self):
+        # Busca iconos del tema del sistema y usa iconos estándar de Qt como respaldo.
         iconos = {
             "btn_modo_sencillo": (
                 ["preferences-system", "applications-system", "system-run"],
@@ -12247,6 +12400,7 @@ class VentanaPrincipal(QMainWindow):
             btn.setIconSize(QSize(16, 16))
 
     def _configurar_menus(self):
+        # Cada señal triggered enlaza la acción del menú con el método que abre su diálogo.
         self.menu_admin = self.ui.menubar.addMenu("Administración")
         self.action_configuracion = QAction("Configuración", self)
         self.ui.menubar.addAction(self.action_configuracion)
@@ -12269,6 +12423,8 @@ class VentanaPrincipal(QMainWindow):
         self.action_configuracion.triggered.connect(self._abrir_configuracion)
 
     def _aplicar_rol(self):
+        # Ajusta visibilidad y habilitación de acciones según DUENO u OPERADOR.
+        # Los métodos que abren opciones administrativas comprueban además el rol.
         rol = (self.rol or "").upper()
         es_admin = rol == "DUENO"
         es_operador = rol == "OPERADOR"
@@ -12366,6 +12522,8 @@ class VentanaPrincipal(QMainWindow):
         _mostrar_error(self, "Error simulado", "Este es un ejemplo de error.")
 
     def _restaurar_base(self):
+        # El restablecimiento completo solicita dos confirmaciones e intenta respaldar.
+        # Si falla el respaldo, pregunta expresamente antes de continuar con el borrado.
         confirmar = QMessageBox.question(
             self,
             "Restablecer a 0",
@@ -12429,6 +12587,7 @@ class VentanaPrincipal(QMainWindow):
             QTimer.singleShot(0, app.quit)
 
     def _configurar_modos(self):
+        # Conecta los botones de navegación con las páginas de cochera y estacionamiento.
         if hasattr(self.ui, "modeButtonsLayout") and not hasattr(self.ui, "btn_modo_sencillo"):
             self.ui.btn_modo_sencillo = QPushButton(self.centralWidget())
             self.ui.btn_modo_sencillo.setObjectName("btn_modo_sencillo")
@@ -12626,6 +12785,7 @@ class VentanaPrincipal(QMainWindow):
         return True
 
     def _abrir_modo_sencillo_estacionamiento(self):
+        # Cambia a la operación rápida del estacionamiento y gestiona el regreso a esta vista.
         disponible, mensaje = self._actualizar_estado_menu_estacionamiento()
         if not disponible:
             QMessageBox.warning(self, "Modo sencillo", mensaje)
@@ -12748,6 +12908,7 @@ class VentanaPrincipal(QMainWindow):
             QMessageBox.information(parent, titulo, mensaje)
 
     def _configurar_estacionamiento(self):
+        # Prepara los campos de ingreso, la tabla de activos y sus acciones de operación.
         if hasattr(self.ui, "est_form_layout") and not hasattr(self.ui, "combo_tipo_vehiculo_est"):
             self.ui.label_est_tipo_vehiculo = QLabel("Tipo vehiculo", self.ui.group_est_registro)
             self.ui.combo_tipo_vehiculo_est = QComboBox(self.ui.group_est_registro)
@@ -12938,6 +13099,7 @@ class VentanaPrincipal(QMainWindow):
         )
 
     def _filtrar_ordenar_activos_est(self, filas):
+        # Trabaja sobre la lista en memoria para cambiar búsqueda y orden sin escribir datos.
         filas_norm = [
             {
                 "id_movimiento": row.get("id_movimiento"),
@@ -13147,6 +13309,8 @@ class VentanaPrincipal(QMainWindow):
                 conn.close()
 
     def _eliminar_ingreso_est(self):
+        # Corrige un ingreso cargado por error: exige DUENO y rechaza movimientos con pagos.
+        # Esta operación no equivale a registrar una salida ni genera un cobro.
         if (self.rol or "").strip().upper() != "DUENO":
             QMessageBox.warning(
                 self,
@@ -13248,6 +13412,7 @@ class VentanaPrincipal(QMainWindow):
                 conn.close()
 
     def _configurar_reloj(self):
+        # QTimer actualiza la hora cada segundo sin bloquear la interacción de la ventana.
         self._actualizar_hora()
         self._reloj_timer = QTimer(self)
         self._reloj_timer.timeout.connect(self._actualizar_hora)
@@ -13266,6 +13431,7 @@ class VentanaPrincipal(QMainWindow):
         self.ui.label_est_hora_value.setText(hora)
 
     def _configurar_dashboard(self):
+        # El resumen se consulta al abrir y se refresca cada cinco segundos.
         self._refrescar_dashboard()
         self._dashboard_timer = QTimer(self)
         self._dashboard_timer.timeout.connect(self._refrescar_dashboard)
@@ -13295,6 +13461,8 @@ class VentanaPrincipal(QMainWindow):
         super().closeEvent(event)
 
     def _refrescar_dashboard(self):
+        # Calcula por separado ocupación mensual y por hora, ingresos y vencimientos.
+        # Al final convierte los resultados de la base en textos de las tarjetas.
         total = 0
         ocupadas = 0
         est_total = 0
@@ -13560,6 +13728,8 @@ class VentanaPrincipal(QMainWindow):
                 conn.close()
 
     def _pasos_primeros_pasos(self):
+        # El tutorial termina con el mapa: tarifas, datos del negocio, carpetas y espacios.
+        # La numeración se añade al final para mantener el mismo orden en los mensajes.
         estado = self._estado_primeros_pasos()
         config_completa = all(
             [
@@ -13737,6 +13907,8 @@ class VentanaPrincipal(QMainWindow):
         return cur.fetchone()
 
     def _resolver_espacio_est(self, cur, codigo):
+        # Con código explícito comprueba exactamente ese lugar; con campo vacío busca uno libre.
+        # Devuelve ID, código y una marca que indica si la asignación fue automática.
         if codigo:
             cur.execute(
                 "SELECT id_espacio, es_reservado, id_cliente FROM espacios "
@@ -13795,6 +13967,8 @@ class VentanaPrincipal(QMainWindow):
         return cur.fetchone()
 
     def _registrar_ingreso_est(self, popup_parent=None):
+        # Procesa un ingreso por hora: valida patente, tipo, disponibilidad y tarifa.
+        # El bloqueo antirrebote evita repetir la acción por pulsaciones consecutivas.
         patente = _normalizar_patente(self.ui.input_patente_est.text())
         patente_fmt = _formatear_patente_estacionamiento(patente)
         self.ui.input_patente_est.setText(patente_fmt)
@@ -13905,6 +14079,7 @@ class VentanaPrincipal(QMainWindow):
                 ") VALUES (?, ?, ?, ?, ?, ?)",
                 (id_vehiculo, id_espacio, ingreso_db, tipo_vehiculo, tarifa_id, tarifa),
             )
+            # El movimiento guarda el precio aplicado al ingresar y su versión de tarifa.
             movimiento_id = cur.lastrowid
             conn.commit()
             ticket, ticket_error = _emitir_ticket_estacionamiento_seguro(
@@ -13963,6 +14138,7 @@ class VentanaPrincipal(QMainWindow):
             _antirebote_finalizar(self, "est_ingreso", cooldown_ms=700)
 
     def _registrar_salida_est(self, popup_parent=None):
+        # Localiza el ingreso abierto, calcula el importe y pide confirmar el cobro.
         patente = _normalizar_patente(self.ui.input_patente_est.text())
         patente_fmt = _formatear_patente_estacionamiento(patente)
         self.ui.input_patente_est.setText(patente_fmt)
@@ -13993,6 +14169,7 @@ class VentanaPrincipal(QMainWindow):
                 return
 
             tipo_vehiculo = _normalizar_tipo_vehiculo(row["tipo_vehiculo"])
+            # Usa el precio guardado en el ingreso; si no es positivo, busca el vigente.
             tarifa = float(row["tarifa_hora_aplicada"] or 0.0)
             if tarifa <= 0:
                 _tarifa_id, tarifa = self._get_tarifa_hora_info(tipo_vehiculo)
@@ -14011,6 +14188,7 @@ class VentanaPrincipal(QMainWindow):
             if not dt_ing:
                 raise ValueError("La fecha del ingreso no es valida. No se registro la salida ni el cobro.")
             horas_cobradas, total = _calcular_total_estadia(
+                # La salida aplica una tolerancia de quince minutos al cálculo de horas.
                 dt_ing,
                 dt_out,
                 tarifa,
@@ -14047,6 +14225,8 @@ class VentanaPrincipal(QMainWindow):
                 return
 
             metodo = svc_normalizar_metodo_pago(metodo)
+            # La salida y su pago se escriben juntos. La condición fecha_salida IS NULL
+            # permite detectar si otra ventana ya cerró el mismo ingreso.
             conn.execute("BEGIN IMMEDIATE")
             cur.execute(
                 "UPDATE movimientos SET fecha_salida = ?, total = ? "
@@ -14062,6 +14242,8 @@ class VentanaPrincipal(QMainWindow):
                 "INSERT INTO pagos (id_movimiento, monto, metodo, fecha_pago, usuario) VALUES (?, ?, ?, ?, ?)",
                 (row["id_movimiento"], total, metodo, salida_db, self.usuario),
             )
+            # Se confirma el cobro antes de generar el ticket: un fallo del PDF no
+            # revierte una salida ya registrada ni provoca un segundo pago.
             conn.commit()
             ticket, ticket_error = _emitir_ticket_estacionamiento_seguro(
                 evento="Salida",
@@ -14129,6 +14311,7 @@ class VentanaPrincipal(QMainWindow):
                 conn.close()
             _antirebote_finalizar(self, "est_salida", cooldown_ms=700)
     def _actualizar_activos_est(self):
+        # Sólo carga movimientos sin salida y luego aplica búsqueda y orden a esa lista.
         self.ui.table_est_activos.setRowCount(0)
         conn = None
         filas_cache = []
@@ -14154,6 +14337,7 @@ class VentanaPrincipal(QMainWindow):
 
 
 def _programar_verificacion_inicio(app):
+    # Diagnóstico de arranque: inspecciona el diálogo de acceso y escribe sus resultados.
     """Diagnostic only: inspect the normal access screen, never skip authentication."""
     import json
     from PySide6.QtGui import QFontDatabase
@@ -14206,6 +14390,7 @@ def _programar_verificacion_inicio(app):
 
 
 if __name__ == "__main__":
+    # PUNTO DE ENTRADA: prepara Qt y la base antes de elegir el flujo de acceso.
     modo_demo = "--demo" in sys.argv
     verificar_inicio = "--verificar-inicio" in sys.argv
     if verificar_inicio and (modo_demo or not os.environ.get("ESTACIONAMIENTO_DATA_DIR", "").strip()):
@@ -14217,9 +14402,11 @@ if __name__ == "__main__":
     respaldo_migracion = None
     if modo_demo:
         from demo_muestra import preparar_demo
+        # La demostración utiliza una sesión temporal gestionada por demo_muestra.
         demo_session = preparar_demo()
     else:
         try:
+            # El servicio crea el respaldo previo cuando corresponde migrar la base.
             respaldo_migracion = respaldar_antes_de_migrar()
             init_db()
         except (sqlite3.Error, OSError) as exc:
@@ -14251,6 +14438,7 @@ if __name__ == "__main__":
     app._demo_session = demo_session
     _aplicar_fuente_aplicacion(app)
     sys.excepthook = _manejar_excepcion_no_controlada
+    # El filtro traduce los botones de diálogos que Qt crea durante la ejecución.
     app._dialog_translation_filter = _DialogTranslationFilter(app)
     app.installEventFilter(app._dialog_translation_filter)
     if verificar_inicio:
@@ -14264,6 +14452,7 @@ if __name__ == "__main__":
         sys.exit(exit_code)
 
     if not _usuarios_existen():
+        # Una base sin cuentas requiere crear al dueño antes de abrir la aplicación.
         crear = FirstUserDialog()
         if crear.exec() != QDialog.Accepted:
             sys.exit(0)
@@ -14272,6 +14461,7 @@ if __name__ == "__main__":
         sys.exit(app.exec())
 
     login = LoginDialog()
+    # Cancelar el acceso termina la ejecución; aceptar transfiere usuario y rol.
     if login.exec() != QDialog.Accepted:
         sys.exit(0)
     ventana = VentanaPrincipal(usuario=login.usuario, rol=login.rol)
